@@ -3,13 +3,14 @@ import { browser } from 'wxt/browser';
 import { useBookmarks } from './hooks/use-bookmarks';
 import { useTabs } from './hooks/use-tabs';
 import './styles.css';
-import { HyperTree } from './components/hyper-tree';
 import {
     useHyperTreeState,
     getHyperTreeNodeId,
-    type HyperTreeNodeData,
 } from './hooks/use-hyper-tree-state';
-import type { TreeNode } from './components/hyper-tree/types';
+import type { TreeNode } from './components/tree/types';
+import { useTheme } from './hooks/use-theme';
+import { HyperTreeNodeData } from "./components/hyper-tree/types";
+import { HyperTree } from "./components/hyper-tree";
 
 export const App = () => {
     const bookmarks = useBookmarks();
@@ -33,7 +34,7 @@ export const App = () => {
             } else if (
                 'bookmark' in item.data &&
                 item.data.bookmark &&
-                item.data.bookmark.url
+                item.data.bookmark.url // bookmark folders do not have a URL
             ) {
                 browser.tabs.create({
                     url: item.data.bookmark.url,
@@ -83,14 +84,14 @@ export const App = () => {
         }
     }, [filterInputRef]);
 
+    const theme = useTheme();
+
     return (
         <div
+            className="app-container"
             style={{
-                position: 'relative',
-                display: 'flex',
-                flexDirection: 'column',
-                height: '100%',
-                alignItems: 'stretch',
+                backgroundColor: theme.page.background,
+                color: theme.page.text,
             }}
         >
             <div
@@ -120,8 +121,7 @@ export const App = () => {
                     right: '5px',
                     zIndex: 1,
                 }}
-            >
-                Search
+            >test
             </button>
             <HyperTree
                 {...props}
@@ -129,7 +129,7 @@ export const App = () => {
                 onActiveItemChange={onActiveItemChangeHandler}
                 isFiltered={filterText !== undefined}
                 onFilter={onFilterHandler}
-                style={{ flex: 1 }}
+                className="hyper-tree"
             />
             <hr />
             {JSON.stringify(bookmarks)}

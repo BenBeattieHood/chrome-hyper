@@ -1,98 +1,93 @@
-import { useRef } from 'react';
-import useResizeObserver from 'use-resize-observer';
-import type { TreeNode } from './types';
-import {
-    type NodeApi,
-    Tree,
-    type NodeRendererProps,
-    type TreeApi,
-} from 'react-arborist';
+import React from 'react';
+import { pick } from '../../utils/framework';
+import { HyperTreeNode } from './types';
+import { Tree } from '../tree';
+import { NodeRendererProps } from 'react-arborist';
+import { AppWindow, Bookmark, ChevronDown } from 'lucide-react';
 
-export interface HyperTreeProps<Data> {
-    items: TreeNode<Data>[];
+export interface HyperTreeProps {
+    items: HyperTreeNode[];
     isFiltered: boolean;
-    onFilter: (item: TreeNode<Data>) => boolean;
+    onFilter: (item: HyperTreeNode) => boolean;
     activeItemId: string;
-    onActiveItemChange: (item: TreeNode<Data>) => void;
-    onItemUpdate?: (item: TreeNode<Data>) => void;
-    onItemRemove?: (item: TreeNode<Data>) => void;
+    onActiveItemChange: (item: HyperTreeNode) => void;
+    onItemUpdate?: (item: HyperTreeNode) => void;
+    onItemRemove?: (item: HyperTreeNode) => void;
     style?: React.CSSProperties;
     className?: string;
 }
 
-export const HyperTree = <Data,>({
+export const HyperTree: React.FC<HyperTreeProps> = ({
     items,
     isFiltered,
     onFilter,
     activeItemId,
     onActiveItemChange,
+    onItemUpdate,
+    onItemRemove,
     style,
     className,
-}: HyperTreeProps<Data>) => {
-    type Item = TreeNode<Data>;
-
-    const treeRef = useRef<TreeApi<Item> | undefined>(undefined);
-    const staticProps = useMemo(
-        () =>
-            ({
-                idAccessor: (item: Item) => item.id,
-                childrenAccessor: (item: Item) => item.children ?? null,
-
-                ref: treeRef,
-                disableDrag: false,
-                disableDrop: false,
-                disableEdit: true,
-                disableMultiSelection: false,
-                openByDefault: true,
-                selectionFollowsFocus: false,
-            }) satisfies Partial<React.ComponentProps<typeof Tree<Item>>>,
-        [treeRef],
-    );
-
-    const searchMatchHandler = useCallback(
-        (node: NodeApi<Item>) => onFilter(node.data),
-        [onFilter],
-    );
-
-    const onActivateHandler = useCallback(
-        (node: NodeApi<Item>) => {
-            if (!node.data.children) {
-                onActiveItemChange(node.data);
-            }
-        },
-        [onActiveItemChange],
-    );
-
-    const { ref: containerRef, width, height } = useResizeObserver();
-
+}) => {
     return (
-        <div ref={containerRef} style={style} className={className}>
-            <Tree
-                {...staticProps}
-                data={items}
-                searchTerm={isFiltered ? ' ' : undefined}
-                searchMatch={searchMatchHandler}
-                onActivate={onActivateHandler}
-                selection={activeItemId}
-                height={height}
-                width={width}
-            >
-                {HyperTreeNode}
-            </Tree>
-        </div>
-    );
-};
+        <Tree
+            items={items}
+            isFiltered={isFiltered}
+            onFilter={onFilter}
+            activeItemId={activeItemId}
+            onActiveItemChange={onActiveItemChange}
+            onItemUpdate={onItemUpdate}
+            onItemRemove={onItemRemove}
+            style={style}
+            className={className}
+        >
+            {HyperTreeNodeRenderer}
+        </Tree>
+    )
+}
 
-const HyperTreeNode = <Data,>({
+const HyperTreeNodeRenderer = <Data,>({
     node,
     style,
     tree,
     dragHandle,
     preview,
-}: NodeRendererProps<TreeNode<Data>>) => {
+}: NodeRendererProps<HyperTreeNode>) => {
+    const data = node.data.data;
+    const nodeType = 
+        'bookmark' in data
+            ? (data.tab ? 'both' : 'bookmark')
+            : 'tab';
+
     return (
-        <div style={style} ref={dragHandle}>
-            {node.data.children ? 'p' : 'c'}
+        <div
+            style={style}
+            ref={dragHandle}
+            title={JSON.stringify(
+                pick(
+                    node,
+                    'isClosed',
+                    'isDraggable',
+                    'isDragging',
+                    'isEditable',
+                    'isEditing',
+                    'isFocused',
+                    'isInternal',
+                    'isLeaf',
+                    'isOnlySelection',
+                    'isOpen',
+                    'isRoot',
+                    'isSelected',
+                    'isSelectedEnd',
+                    'isSelectedStart',
+                    'level',
+                ),
+                null,
+                2,
+            )}
+        >
+            {node.data.children && <ChevronDown /> }
+            {(nodeType === 'bookmark' || nodeType === 'both') && <Bookmark/>}
+            {(nodeType === 'tab' || nodeType === 'both') && <AppWindow />}
             {preview ? '_' : ' '}
             {node.data.text}
         </div>

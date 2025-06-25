@@ -1,5 +1,6 @@
-import { HyperTreeProps } from "../components/hyper-tree";
-import { TreeNode } from "../components/hyper-tree/types";
+import { HyperTreeNodeData } from "../components/hyper-tree/types";
+import { TreeProps } from "../components/tree";
+import { TreeNode } from "../components/tree/types";
 
 interface UseHyperTreeStateProps<InputData, ItemData> {
     bookmarks: Browser.bookmarks.BookmarkTreeNode[];
@@ -9,12 +10,7 @@ interface UseHyperTreeStateProps<InputData, ItemData> {
     // onItemRemove?: (item: TreeItem<ItemData>) => void;
 }
 
-export type HyperTreeNodeData = {
-    bookmark: Browser.bookmarks.BookmarkTreeNode;
-    tab: Browser.tabs.Tab | undefined;
-} | {
-    tab: Browser.tabs.Tab;
-}
+const NEW_TAB_URL = 'about:newtab';
 
 export const useHyperTreeState = <InputData, ItemData>({
     bookmarks,
@@ -23,7 +19,7 @@ export const useHyperTreeState = <InputData, ItemData>({
     const items = useMemo(() => {
         const tabLookup = new Map<string, Browser.tabs.Tab[]>();
         tabs.forEach(tab => {
-            const urlKey = getUrlAsMapKey(tab.url);
+            const urlKey = tab.url !== undefined ? getUrlAsMapKey(tab.url) : NEW_TAB_URL;
             const existingTabs = tabLookup.get(urlKey);
             if (existingTabs) {
                 existingTabs.push(tab);
@@ -41,22 +37,24 @@ export const useHyperTreeState = <InputData, ItemData>({
     return {
         items,
         activeItemId: tabs.find(tab => tab.highlighted)?.url,
-    } satisfies Partial<HyperTreeProps<HyperTreeNodeData>>;
+    } satisfies Partial<TreeProps<HyperTreeNodeData>>;
 }
 
-const getUrlAsMapKey = (url: string | undefined): string => {
-    if (!url) {
-        return 'about:blank'; // Fallback for undefined URLs
+const getUrlAsMapKey = (url: string): string => {
+    if (url) {
+        const urlLowerCase = url.toLowerCase();
+        switch (urlLowerCase) {
+            // Normalize new tab URL across browsers and extensions (user can customize new tab page in many browsers)
+            case 'chrome://newtab/':
+            case 'firefox://newtab/':
+            case 'brave://newtab/':
+                return NEW_TAB_URL;
+        }
     }
-    try {
-        const result = new URL(url);
-        result.hostname = result.hostname.toLowerCase(); // Normalize hostname to lowercase
-        result.pathname = result.pathname.replace(/\/$/, ''); // Remove trailing slash for consistency
-        return result.toString();
-    } catch (e) {
-        console.error("Invalid URL:", url, e);
-        return url; // Fallback to the original string if URL parsing fails
-    }
+    const result = new URL(url);
+    result.hostname = result.hostname.toLowerCase(); // Normalize hostname to lowercase
+    result.pathname = result.pathname.replace(/\/$/, ''); // Remove trailing slash for consistency
+    return result.toString();
 }
 
 export function getHyperTreeNodeId(item: Browser.bookmarks.BookmarkTreeNode | Browser.tabs.Tab): string {
@@ -75,9 +73,9 @@ const convertBookmarkToTreeItem = (
     if (bookmark.url === undefined && bookmark.children === undefined) {
         throw new Error("Bookmark must have either a 'url' or 'children' property");
     }
-    const bookmarkUrlAsMapKey = getUrlAsMapKey(bookmark.url);
-    const tabs = bookmarkUrlAsMapKey ? tabLookup.get(bookmarkUrlAsMapKey) : undefined;
-    const tab = tabs && tabs.length > 0 ? tabs.find(tab => !allocatedTabs.has(tab)) : undefined;
+    const bookmarkUrlAsMapKey = bookmark.url !== undefined ? getUrlAsMapKey(bookmark.url) : undefined;
+    const tabs = bookmarkUrlAsMapKey !== undefined ? tabLookup.get(bookmarkUrlAsMapKey) : undefined;
+    const tab = tabs !== undefined && tabs.length > 0 ? tabs.find(tab => !allocatedTabs.has(tab)) : undefined;
     if (tab) {
         allocatedTabs.add(tab);
     }
