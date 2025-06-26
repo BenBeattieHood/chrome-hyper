@@ -1,3 +1,4 @@
+import { vanillaExtractPlugin } from '@vanilla-extract/vite-plugin';
 import { defineConfig } from 'wxt';
 import fs from "node:fs";
 const packageJson = JSON.parse(fs.readFileSync("./package.json", "utf-8"));
@@ -22,4 +23,9 @@ export default defineConfig({
             "tabs",
         ],
     },
+    vite: () => ({
+        plugins: [vanillaExtractPlugin({
+            identifiers: 'debug',
+        })]
+    })
 });

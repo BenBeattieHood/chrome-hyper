@@ -10,6 +10,18 @@ export const pick = <T extends Record<string, any>, K extends (keyof T)[]>(
     }, {} as Pick<T, K[number]>);
 }
 
+export const omit = <T extends Record<string, any>, K extends (keyof T)[]>(
+    obj: T,
+    ...keys: K
+): Omit<T, K[number]> => {
+    return Object.keys(obj).reduce((acc, key) => {
+        if (!keys.includes(key as keyof T)) {
+            (acc as any)[key as keyof T] = obj[key as keyof T];
+        }
+        return acc;
+    }, {} as Omit<T, K[number]>);
+}
+
 /**
  * Performs a deep equality check between two values
  */

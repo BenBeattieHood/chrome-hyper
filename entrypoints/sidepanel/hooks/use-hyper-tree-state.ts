@@ -1,6 +1,4 @@
-import { HyperTreeNodeData } from "../components/hyper-tree/types";
-import { TreeProps } from "../components/tree";
-import { TreeNode } from "../components/tree/types";
+import { HyperTreeNode } from "./types";
 
 interface UseHyperTreeStateProps<InputData, ItemData> {
     bookmarks: Browser.bookmarks.BookmarkTreeNode[];
@@ -37,7 +35,7 @@ export const useHyperTreeState = <InputData, ItemData>({
     return {
         items,
         activeItemId: tabs.find(tab => tab.highlighted)?.url,
-    } satisfies Partial<TreeProps<HyperTreeNodeData>>;
+    };
 }
 
 const getUrlAsMapKey = (url: string): string => {
@@ -69,7 +67,7 @@ const convertBookmarkToTreeItem = (
     bookmark: Browser.bookmarks.BookmarkTreeNode,
     tabLookup: Map<string, Browser.tabs.Tab[]>,
     allocatedTabs: WeakSet<Browser.tabs.Tab>
-): TreeNode<HyperTreeNodeData> => {
+): HyperTreeNode => {
     if (bookmark.url === undefined && bookmark.children === undefined) {
         throw new Error("Bookmark must have either a 'url' or 'children' property");
     }
@@ -79,7 +77,7 @@ const convertBookmarkToTreeItem = (
     if (tab) {
         allocatedTabs.add(tab);
     }
-    const result: TreeNode<HyperTreeNodeData> = {
+    const result: HyperTreeNode = {
         id: getHyperTreeNodeId(tab ?? bookmark),
         text: bookmark.title,
         data: {
@@ -93,7 +91,7 @@ const convertBookmarkToTreeItem = (
 
 const convertTabToOrphanedTreeItem = (
     tab: Browser.tabs.Tab,
-): TreeNode<HyperTreeNodeData> => {
+): HyperTreeNode => {
     return {
         id: getHyperTreeNodeId(tab),
         text: tab.title || 'Untitled Tab',

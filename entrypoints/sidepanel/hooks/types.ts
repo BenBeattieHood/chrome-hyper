@@ -1,4 +1,9 @@
-import { TreeNode } from "../tree/types";
+export interface TreeNode<Data> {
+    id: string;
+    text: string;
+    data: Data
+    children?: TreeNode<Data>[];
+}
 
 export type HyperTreeNodeData = {
     bookmark: Browser.bookmarks.BookmarkTreeNode;

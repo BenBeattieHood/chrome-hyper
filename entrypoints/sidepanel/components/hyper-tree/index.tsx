@@ -1,9 +1,9 @@
-import React from 'react';
-import { pick } from '../../utils/framework';
-import { HyperTreeNode } from './types';
-import { Tree } from '../tree';
-import { NodeRendererProps } from 'react-arborist';
-import { AppWindow, Bookmark, ChevronDown } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { CancelDrop, UniqueIdentifier } from '@dnd-kit/core';
+import { HyperTreeNode } from '../../hooks/types';
+import { DragContainer, TRASH_ID } from '../drag-container';
+import { ConfirmModal } from '../drag-container/components';
+import { SortableTree } from '../drag-container/components/SortableTree';
 
 export interface HyperTreeProps {
     items: HyperTreeNode[];
@@ -28,68 +28,36 @@ export const HyperTree: React.FC<HyperTreeProps> = ({
     style,
     className,
 }) => {
-    return (
-        <Tree
-            items={items}
-            isFiltered={isFiltered}
-            onFilter={onFilter}
-            activeItemId={activeItemId}
-            onActiveItemChange={onActiveItemChange}
-            onItemUpdate={onItemUpdate}
-            onItemRemove={onItemRemove}
-            style={style}
-            className={className}
-        >
-            {HyperTreeNodeRenderer}
-        </Tree>
-    )
-}
+    const [activeId, setActiveId] = useState<UniqueIdentifier | null>(null);
+    const resolveRef = useRef<(value: boolean) => void>(null);
 
-const HyperTreeNodeRenderer = <Data,>({
-    node,
-    style,
-    tree,
-    dragHandle,
-    preview,
-}: NodeRendererProps<HyperTreeNode>) => {
-    const data = node.data.data;
-    const nodeType = 
-        'bookmark' in data
-            ? (data.tab ? 'both' : 'bookmark')
-            : 'tab';
+    const cancelDrop: CancelDrop = async ({ active, over }) => {
+        if (over?.id !== TRASH_ID) {
+            return false;
+        }
+
+        setActiveId(active.id);
+
+        const confirmed = await new Promise<boolean>((resolve) => {
+            resolveRef.current = resolve;
+        });
+
+        setActiveId(null);
+
+        return confirmed === false;
+    };
 
     return (
-        <div
-            style={style}
-            ref={dragHandle}
-            title={JSON.stringify(
-                pick(
-                    node,
-                    'isClosed',
-                    'isDraggable',
-                    'isDragging',
-                    'isEditable',
-                    'isEditing',
-                    'isFocused',
-                    'isInternal',
-                    'isLeaf',
-                    'isOnlySelection',
-                    'isOpen',
-                    'isRoot',
-                    'isSelected',
-                    'isSelectedEnd',
-                    'isSelectedStart',
-                    'level',
-                ),
-                null,
-                2,
+        <>
+            <DragContainer cancelDrop={cancelDrop} trashable />
+            {activeId && (
+                <ConfirmModal
+                    onConfirm={() => resolveRef.current?.(true)}
+                    onDeny={() => resolveRef.current?.(false)}
+                >
+                    Are you sure you want to delete "{activeId}"?
+                </ConfirmModal>
             )}
-        >
-            {node.data.children && <ChevronDown /> }
-            {(nodeType === 'bookmark' || nodeType === 'both') && <Bookmark/>}
-            {(nodeType === 'tab' || nodeType === 'both') && <AppWindow />}
-            {preview ? '_' : ' '}
-            {node.data.text}
-        </div>
+        </>
     );
 };

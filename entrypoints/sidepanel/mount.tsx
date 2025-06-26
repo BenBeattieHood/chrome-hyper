@@ -1,11 +1,11 @@
-import React, { Suspense } from "react";
-import ReactDOM from "react-dom/client";
-import {App} from "./app";
+import React, { Suspense } from 'react';
+import ReactDOM from 'react-dom/client';
+import { App } from './app';
 
 ReactDOM.createRoot(document.body).render(
-  <React.StrictMode>
+    //   <React.StrictMode>
     <Suspense>
-      <App />
-    </Suspense>
-  </React.StrictMode>
+        <App />
+    </Suspense>,
+    //   </React.StrictMode>
 );
