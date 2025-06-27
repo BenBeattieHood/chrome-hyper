@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useRef,
+    useState,
+} from 'react';
 import { createPortal, unstable_batchedUpdates } from 'react-dom';
 import {
     CancelDrop,
@@ -21,6 +27,12 @@ import {
     MeasuringStrategy,
     KeyboardCoordinateGetter,
     defaultDropAnimationSideEffects,
+    closestCorners,
+    DragStartEvent,
+    DragMoveEvent,
+    DragOverEvent,
+    DragEndEvent,
+    DragCancelEvent,
 } from '@dnd-kit/core';
 import {
     AnimateLayoutChanges,
@@ -38,15 +50,13 @@ import { coordinateGetter as multipleContainersCoordinateGetter } from '../utils
 import { Item, Container, ContainerProps } from './components';
 
 import { createRange } from './create-range';
-
-export default {
-    title: 'Presets/Sortable/Multiple Containers',
-};
+import { NodeRendererProps } from 'react-arborist';
+import { omit } from '../../utils/framework';
 
 const animateLayoutChanges: AnimateLayoutChanges = (args) =>
     defaultAnimateLayoutChanges({ ...args, wasDragging: true });
 
-function DroppableContainer({
+function DroppableContainer<Value>({
     children,
     columns = 1,
     disabled,
@@ -57,7 +67,7 @@ function DroppableContainer({
 }: ContainerProps & {
     disabled?: boolean;
     id: UniqueIdentifier;
-    items: UniqueIdentifier[];
+    items: Record<UniqueIdentifier, Value>;
     style?: React.CSSProperties;
 }) {
     const {
@@ -73,13 +83,13 @@ function DroppableContainer({
         id,
         data: {
             type: 'container',
-            children: items,
+            children: Object.keys(items),
         },
         animateLayoutChanges,
     });
     const isOverContainer = over
         ? (id === over.id && active?.data.current?.type !== 'container') ||
-          items.includes(over.id)
+          over.id in items
         : false;
 
     return (
@@ -114,151 +124,328 @@ const dropAnimation: DropAnimation = {
     }),
 };
 
-type Items = Record<UniqueIdentifier, UniqueIdentifier[]>;
+interface HierarchialNode<Value> {
+    isExpanded: boolean;
+    value: Value;
+    children: Record<UniqueIdentifier, HierarchialNode<Value>>;
+}
+interface FlattenedHierarchialNode<Value>
+    extends Omit<HierarchialNode<Value>, 'children' | 'isExpanded'> {
+    id: UniqueIdentifier;
+    depth: number;
+    hiddenChildren:
+        | Record<UniqueIdentifier, HierarchialNode<Value>>
+        | undefined;
+}
 
-interface Props {
-    adjustScale?: boolean;
+const flattenHierarchialNodes = <Value,>(
+    nodes: Record<UniqueIdentifier, HierarchialNode<Value>>,
+    depth = 0,
+): FlattenedHierarchialNode<Value>[] =>
+    Object.entries(nodes).flatMap(([id, { isExpanded, value, children }]) => {
+        const result: FlattenedHierarchialNode<Value>[] = [
+            {
+                id,
+                depth,
+                value,
+                hiddenChildren: isExpanded ? undefined : children,
+            },
+        ];
+
+        if (isExpanded) {
+            result.push(...flattenHierarchialNodes<Value>(children, depth + 1));
+        }
+
+        return result;
+    });
+
+const nestFlattenedNodes = <Value,>(
+    flattenedNodes: FlattenedHierarchialNode<Value>[],
+    minDepth = 0,
+): Record<UniqueIdentifier, HierarchialNode<Value>> => {
+    const nodes: Record<UniqueIdentifier, HierarchialNode<Value>> = {};
+    for (let i = 0; i < flattenedNodes.length; i++) {
+        const { id, depth, value, hiddenChildren } = flattenedNodes[i];
+        if (depth < minDepth) {
+            return nodes;
+        }
+
+        const candidateNestedNodesNextIndex = hiddenChildren
+            ? -1
+            : flattenedNodes.findIndex(
+                  (candidate, n) => n > i && candidate.depth <= minDepth,
+              );
+
+        nodes[id] = {
+            isExpanded: hiddenChildren === undefined,
+            value,
+            children:
+                hiddenChildren ??
+                (candidateNestedNodesNextIndex > i
+                    ? nestFlattenedNodes(
+                          flattenedNodes.slice(
+                              i + 1,
+                              candidateNestedNodesNextIndex,
+                          ),
+                          depth + 1,
+                      )
+                    : {}),
+        };
+        i = candidateNestedNodesNextIndex - 1;
+    }
+    return nodes;
+};
+
+const simplifyFlattenedNodes = <Value,>(
+    flattenedNodes: FlattenedHierarchialNode<Value>[],
+): Record<UniqueIdentifier, Value> =>
+    flattenedNodes.reduce(
+        (acc, { id, depth, hiddenChildren, value }) => {
+            if (depth > 0 || hiddenChildren !== undefined) {
+                throw new Error(
+                    'Cannot simplify flattened nodes with depth > 0 or hidden children',
+                );
+            }
+            acc[id] = value;
+            return acc;
+        },
+        {} as Record<UniqueIdentifier, Value>,
+    );
+
+type ItemRenderer<Value> = React.ComponentType<
+    NodeRendererProps<{ id: UniqueIdentifier; value: Value }>
+>;
+
+function hasChildId(
+    id: UniqueIdentifier,
+    children: Record<UniqueIdentifier, HierarchialNode<any>>,
+): boolean {
+    return (
+        id in children ||
+        Object.values(children).some((child) => hasChildId(id, child.children))
+    );
+}
+
+interface ContainerRef {
+    containerId: UniqueIdentifier;
+    containerType: 'grid' | 'tree' | 'list';
+}
+
+interface Props<Value> {
     cancelDrop?: CancelDrop;
-    columns?: number;
     containerStyle?: React.CSSProperties;
-    coordinateGetter?: KeyboardCoordinateGetter;
-    getItemStyles?(args: {
-        value: UniqueIdentifier;
-        index: number;
-        overIndex: number;
-        isDragging: boolean;
-        containerId: UniqueIdentifier;
-        isSorting: boolean;
-        isDragOverlay: boolean;
-    }): React.CSSProperties;
-    wrapperStyle?(args: { index: number }): React.CSSProperties;
-    itemCount?: number;
-    items?: Items;
-    handle?: boolean;
-    renderItem?: any;
-    strategy?: SortingStrategy;
-    modifiers?: Modifiers;
-    minimal?: boolean;
-    trashable?: boolean;
-    scrollable?: boolean;
-    vertical?: boolean;
+    gridItems: Record<UniqueIdentifier, Value>;
+    trees: Record<
+        UniqueIdentifier,
+        Record<UniqueIdentifier, HierarchialNode<Value>>
+    >;
+    listItems: Record<UniqueIdentifier, Value>;
+    onMoveItem: (args: {
+        from: {
+            container: ContainerRef;
+            data:
+                | Record<UniqueIdentifier, Value>
+                | Record<UniqueIdentifier, HierarchialNode<Value>>;
+        };
+        to: {
+            container: ContainerRef;
+            data:
+                | Record<UniqueIdentifier, Value>
+                | Record<UniqueIdentifier, HierarchialNode<Value>>;
+        };
+    }) => void;
 }
 
 export const TRASH_ID = 'void';
-const PLACEHOLDER_ID = 'placeholder';
+const GRID_CONTAINER_ID = 'grid-container';
+const LIST_CONTAINER_ID = 'list-container';
+const TREES_PLACEHOLDER_ID = 'tree-placeholder';
 const empty: UniqueIdentifier[] = [];
 
-export function DragContainer({
-    adjustScale = false,
-    itemCount = 3,
+type FlattenedItems<Value> = Record<
+    typeof GRID_CONTAINER_ID | typeof LIST_CONTAINER_ID | UniqueIdentifier,
+    FlattenedHierarchialNode<Value>[]
+>;
+
+export function DragContainer<Value>({
     cancelDrop,
-    columns,
-    handle = false,
-    items: initialItems,
-    containerStyle,
-    coordinateGetter = multipleContainersCoordinateGetter,
-    getItemStyles = () => ({}),
-    wrapperStyle = () => ({}),
-    minimal = false,
-    modifiers,
-    renderItem,
-    strategy = verticalListSortingStrategy,
-    trashable = false,
-    vertical = false,
-    scrollable,
-}: Props) {
-    const [items, setItems] = useState<Items>(() => {
-        console.log('initializing items');
-        return (
-            initialItems ?? {
-                A: createRange(itemCount, (index) => `A${index + 1}`),
-                B: createRange(itemCount, (index) => `B${index + 1}`),
-                C: createRange(itemCount, (index) => `C${index + 1}`),
-                D: createRange(itemCount, (index) => `D${index + 1}`),
+    gridItems,
+    trees,
+    listItems,
+    onMoveItem,
+}: Props<Value>) {
+    const findContainer = useCallback(
+        (
+            id: UniqueIdentifier,
+        ):
+            | {
+                  containerId: UniqueIdentifier;
+                  containerType: 'grid' | 'tree' | 'list';
+              }
+            | undefined => {
+            if (id === GRID_CONTAINER_ID) {
+                return {
+                    containerId: GRID_CONTAINER_ID,
+                    containerType: 'grid',
+                };
+            } else if (id === LIST_CONTAINER_ID) {
+                return {
+                    containerId: LIST_CONTAINER_ID,
+                    containerType: 'list',
+                };
             }
-        );
-    });
-    const [containers, setContainers] = useState(
-        Object.keys(items) as UniqueIdentifier[],
-    );
-    const [activeId, setActiveId] = useState<UniqueIdentifier | null>(null);
-    const lastOverId = useRef<UniqueIdentifier | null>(null);
-    const recentlyMovedToNewContainer = useRef(false);
-    const isSortingContainer =
-        activeId != null ? containers.includes(activeId) : false;
 
-    /**
-     * Custom collision detection strategy optimized for multiple containers
-     *
-     * - First, find any droppable containers intersecting with the pointer.
-     * - If there are none, find intersecting containers with the active draggable.
-     * - If there are no intersecting containers, return the last matched intersection
-     *
-     */
-    const collisionDetectionStrategy: CollisionDetection = useCallback(
-        (args) => {
-            if (activeId && activeId in items) {
-                return closestCenter({
-                    ...args,
-                    droppableContainers: args.droppableContainers.filter(
-                        (container) => container.id in items,
+            const treeEntry = Object.entries(trees).find(
+                ([, nodes]) =>
+                    id in nodes ||
+                    Object.values(nodes).some((node) =>
+                        hasChildId(id, node.children),
                     ),
-                });
+            );
+            if (treeEntry) {
+                return {
+                    containerId: treeEntry[0],
+                    containerType: 'tree',
+                };
             }
 
-            // Start by finding any intersecting droppable
-            const pointerIntersections = pointerWithin(args);
-            const intersections =
-                pointerIntersections.length > 0
-                    ? // If there are droppables intersecting with the pointer, return those
-                      pointerIntersections
-                    : rectIntersection(args);
-            let overId = getFirstCollision(intersections, 'id');
-
-            if (overId != null) {
-                if (overId === TRASH_ID) {
-                    // If the intersecting droppable is the trash, return early
-                    // Remove this if you're not using trashable functionality in your app
-                    return intersections;
-                }
-
-                if (overId in items) {
-                    const containerItems = items[overId];
-
-                    // If a container is matched and it contains items (columns 'A', 'B', 'C')
-                    if (containerItems.length > 0) {
-                        // Return the closest droppable within that container
-                        overId = closestCenter({
-                            ...args,
-                            droppableContainers:
-                                args.droppableContainers.filter(
-                                    (container) =>
-                                        container.id !== overId &&
-                                        containerItems.includes(container.id),
-                                ),
-                        })[0]?.id;
-                    }
-                }
-
-                lastOverId.current = overId;
-
-                return [{ id: overId }];
-            }
-
-            // When a draggable item moves to a new container, the layout may shift
-            // and the `overId` may become `null`. We manually set the cached `lastOverId`
-            // to the id of the draggable item that was moved to the new container, otherwise
-            // the previous `overId` will be returned which can cause items to incorrectly shift positions
-            if (recentlyMovedToNewContainer.current) {
-                lastOverId.current = activeId;
-            }
-
-            // If no droppable is matched, return the last match
-            return lastOverId.current ? [{ id: lastOverId.current }] : [];
+            return undefined;
         },
-        [activeId, items],
+        [trees],
     );
-    const [clonedItems, setClonedItems] = useState<Items | null>(null);
+
+    const flattenedItems = useMemo<FlattenedItems<Value>>(
+        () => ({
+            [GRID_CONTAINER_ID]: Object.entries(gridItems).map(
+                ([id, value]) => ({
+                    id,
+                    depth: 0,
+                    value,
+                    hiddenChildren: undefined,
+                }),
+            ),
+            ...Object.fromEntries(
+                Object.entries(trees).map(
+                    ([treeContainerId, nodes]) =>
+                        [
+                            treeContainerId,
+                            flattenHierarchialNodes(nodes),
+                        ] as const,
+                ),
+            ),
+            [LIST_CONTAINER_ID]: Object.entries(listItems).map(
+                ([id, value]) => ({
+                    id,
+                    depth: 0,
+                    value,
+                    hiddenChildren: undefined,
+                }),
+            ),
+        }),
+        [gridItems, trees, listItems],
+    );
+
+    const [dragData, setDragData] = useState<FlattenedItems<Value>>();
+
+    const findDragDataContainerAndItem = useCallback(
+        (id: UniqueIdentifier | undefined) => {
+            if (!id) {
+                return undefined;
+            }
+
+            const c = findContainer(id)!;
+            const items: FlattenedHierarchialNode<Value>[] = (dragData as any)[
+                c.containerId
+            ];
+
+            const itemIndex = items.findIndex((item) => item.id === id);
+            return {
+                containerId: c.containerId,
+                containerType: c.containerType,
+                item: items[itemIndex],
+                itemIndex,
+            };
+        },
+        [findContainer, dragData],
+    );
+
+    const [draggingId, setDraggingId] = useState<UniqueIdentifier>();
+    const [dragOverId, setDragOverId] = useState<UniqueIdentifier>();
+    const draggingContainerAndItem = useMemo(
+        () => findDragDataContainerAndItem(draggingId),
+        [draggingId, findContainer],
+    );
+    const dragOverContainerAndItem = useMemo(
+        () => findDragDataContainerAndItem(dragOverId),
+        [dragOverId, findContainer],
+    );
+    const [draggingOffsetLeft, setDraggingOffsetLeft] = useState(0);
+
+    useLayoutEffect(() => {
+        if (
+            dragOverId === undefined ||
+            dragOverId === TRASH_ID ||
+            draggingId === undefined ||
+            draggingContainerAndItem === undefined ||
+            dragOverContainerAndItem === undefined
+        ) {
+            return;
+        }
+
+        setDragData((prevDragData) => {
+            const dragData = prevDragData ?? flattenedItems;
+            return Object.fromEntries(
+                Object.entries(dragData).map(([containerId, items]) => {
+                    if (containerId === dragOverContainerAndItem.containerId) {
+                        return [
+                            containerId,
+                            items.flatMap((item) => {
+                                const itemResult = [];
+                                if (item.id !== draggingId) {
+                                    itemResult.push(item);
+                                }
+                                if (item.id === dragOverId) {
+                                    return [
+                                        {
+                                            ...item,
+                                            depth:
+                                                dragOverContainerAndItem.item
+                                                    .depth + 1,
+                                        },
+                                    ];
+                                }
+                                return itemResult;
+                            }),
+                        ];
+                    } else if (
+                        containerId === draggingContainerAndItem.containerId
+                    ) {
+                        return [
+                            containerId,
+                            items.filter((item) => item.id !== draggingId),
+                        ];
+                    } else {
+                        return [containerId, items];
+                    }
+                }),
+            );
+        });
+    }, [
+        dragOverId,
+        draggingId,
+        draggingContainerAndItem,
+        dragOverContainerAndItem,
+        flattenedItems,
+    ]);
+
+    const [coordinateGetter] = useState(() =>
+        sortableTreeKeyboardCoordinates(
+            sensorContext,
+            indicator,
+            indentationWidth,
+        ),
+    );
+
     const sensors = useSensors(
         useSensor(MouseSensor),
         useSensor(TouchSensor),
@@ -266,380 +453,246 @@ export function DragContainer({
             coordinateGetter,
         }),
     );
-    const findContainer = (id: UniqueIdentifier) => {
-        if (id in items) {
-            return id;
-        }
-
-        return Object.keys(items).find((key) => items[key].includes(id));
-    };
-
-    const getIndex = (id: UniqueIdentifier) => {
-        const container = findContainer(id);
-
-        if (!container) {
-            return -1;
-        }
-
-        const index = items[container].indexOf(id);
-
-        return index;
-    };
-
-    const onDragCancel = () => {
-        if (clonedItems) {
-            // Reset items to their original state in case items have been
-            // Dragged across containers
-            setItems(clonedItems);
-        }
-
-        setActiveId(null);
-        setClonedItems(null);
-    };
-
-    useEffect(() => {
-        requestAnimationFrame(() => {
-            recentlyMovedToNewContainer.current = false;
-        });
-    }, [items]);
 
     return (
         <DndContext
             sensors={sensors}
-            collisionDetection={collisionDetectionStrategy}
+            collisionDetection={closestCorners}
             measuring={{
                 droppable: {
                     strategy: MeasuringStrategy.Always,
                 },
             }}
-            onDragStart={({ active }) => {
-                setActiveId(active.id);
-                setClonedItems(items);
-            }}
-            onDragOver={({ active, over }) => {
-                const overId = over?.id;
-
-                if (
-                    overId == null ||
-                    overId === TRASH_ID ||
-                    active.id in items
-                ) {
-                    return;
-                }
-
-                const overContainer = findContainer(overId);
-                const activeContainer = findContainer(active.id);
-
-                if (!overContainer || !activeContainer) {
-                    return;
-                }
-
-                if (activeContainer !== overContainer) {
-                    setItems((items) => {
-                        const activeItems = items[activeContainer];
-                        const overItems = items[overContainer];
-                        const overIndex = overItems.indexOf(overId);
-                        const activeIndex = activeItems.indexOf(active.id);
-
-                        let newIndex: number;
-
-                        if (overId in items) {
-                            newIndex = overItems.length + 1;
-                        } else {
-                            const isBelowOverItem =
-                                over &&
-                                active.rect.current.translated &&
-                                active.rect.current.translated.top >
-                                    over.rect.top + over.rect.height;
-
-                            const modifier = isBelowOverItem ? 1 : 0;
-
-                            newIndex =
-                                overIndex >= 0
-                                    ? overIndex + modifier
-                                    : overItems.length + 1;
-                        }
-
-                        recentlyMovedToNewContainer.current = true;
-
-                        return {
-                            ...items,
-                            [activeContainer]: items[activeContainer].filter(
-                                (item) => item !== active.id,
-                            ),
-                            [overContainer]: [
-                                ...items[overContainer].slice(0, newIndex),
-                                items[activeContainer][activeIndex],
-                                ...items[overContainer].slice(
-                                    newIndex,
-                                    items[overContainer].length,
-                                ),
-                            ],
-                        };
-                    });
-                }
-            }}
-            onDragEnd={({ active, over }) => {
-                if (active.id in items && over?.id) {
-                    setContainers((containers) => {
-                        const activeIndex = containers.indexOf(active.id);
-                        const overIndex = containers.indexOf(over.id);
-
-                        return arrayMove(containers, activeIndex, overIndex);
-                    });
-                }
-
-                const activeContainer = findContainer(active.id);
-
-                if (!activeContainer) {
-                    setActiveId(null);
-                    return;
-                }
-
-                const overId = over?.id;
-
-                if (overId == null) {
-                    setActiveId(null);
-                    return;
-                }
-
-                if (overId === TRASH_ID) {
-                    setItems((items) => ({
-                        ...items,
-                        [activeContainer]: items[activeContainer].filter(
-                            (id) => id !== activeId,
-                        ),
-                    }));
-                    setActiveId(null);
-                    return;
-                }
-
-                if (overId === PLACEHOLDER_ID) {
-                    const newContainerId = getNextContainerId();
-
-                    unstable_batchedUpdates(() => {
-                        setContainers((containers) => [
-                            ...containers,
-                            newContainerId,
-                        ]);
-                        setItems((items) => ({
-                            ...items,
-                            [activeContainer]: items[activeContainer].filter(
-                                (id) => id !== activeId,
-                            ),
-                            [newContainerId]: [active.id],
-                        }));
-                        setActiveId(null);
-                    });
-                    return;
-                }
-
-                const overContainer = findContainer(overId);
-
-                if (overContainer) {
-                    const activeIndex = items[activeContainer].indexOf(
-                        active.id,
-                    );
-                    const overIndex = items[overContainer].indexOf(overId);
-
-                    if (activeIndex !== overIndex) {
-                        setItems((items) => ({
-                            ...items,
-                            [overContainer]: arrayMove(
-                                items[overContainer],
-                                activeIndex,
-                                overIndex,
-                            ),
-                        }));
-                    }
-                }
-
-                setActiveId(null);
-            }}
+            onDragStart={handleDragStart}
+            onDragMove={handleDragMove}
+            onDragOver={handleDragOver}
+            onDragEnd={handleDragEnd}
+            onDragCancel={handleDragCancel}
             cancelDrop={cancelDrop}
-            onDragCancel={onDragCancel}
-            modifiers={modifiers}
         >
-            <div
-                style={{
-                    display: 'inline-grid',
-                    boxSizing: 'border-box',
-                    padding: 20,
-                    gridAutoFlow: vertical ? 'row' : 'column',
-                }}
+            <DroppableContainer
+                key={GRID_CONTAINER_ID}
+                id={GRID_CONTAINER_ID}
+                columns={6}
+                items={gridItems}
+                scrollable
             >
                 <SortableContext
-                    items={[...containers, PLACEHOLDER_ID]}
-                    strategy={
-                        vertical
-                            ? verticalListSortingStrategy
-                            : horizontalListSortingStrategy
-                    }
+                    items={Object.keys(gridItems)}
+                    strategy={strategy}
                 >
-                    {containers.map((containerId) => (
-                        <DroppableContainer
-                            key={containerId}
-                            id={containerId}
-                            label={
-                                minimal ? undefined : `Column ${containerId}`
-                            }
-                            columns={columns}
-                            items={items[containerId]}
-                            scrollable={scrollable}
-                            style={containerStyle}
-                            unstyled={minimal}
-                            onRemove={() => handleRemove(containerId)}
-                        >
-                            <SortableContext
-                                items={items[containerId]}
-                                strategy={strategy}
-                            >
-                                {items[containerId].map((value, index) => {
-                                    return (
-                                        <SortableItem
-                                            disabled={isSortingContainer}
-                                            key={value}
-                                            id={value}
-                                            index={index}
-                                            handle={handle}
-                                            style={getItemStyles}
-                                            wrapperStyle={wrapperStyle}
-                                            renderItem={renderItem}
-                                            containerId={containerId}
-                                            getIndex={getIndex}
-                                        />
-                                    );
-                                })}
-                            </SortableContext>
-                        </DroppableContainer>
-                    ))}
-                    {minimal ? undefined : (
-                        <DroppableContainer
-                            id={PLACEHOLDER_ID}
-                            disabled={isSortingContainer}
-                            items={empty}
-                            onClick={handleAddColumn}
-                            placeholder
-                        >
-                            + Add column
-                        </DroppableContainer>
-                    )}
+                    {Object.entries(gridItems).map(([id, value], index) => {
+                        return (
+                            <SortableGridItem
+                                disabled={isSortingTreeContainers}
+                                key={id}
+                                id={id}
+                                index={index}
+                                handle={handle}
+                                style={getItemStyles}
+                                wrapperStyle={gridItemWrapperStyle}
+                                renderItem={renderItem}
+                                containerId={GRID_CONTAINER_ID}
+                                getIndex={getIndex}
+                            />
+                        );
+                    })}
                 </SortableContext>
-            </div>
+            </DroppableContainer>
+            <SortableContext
+                items={[...trees, PLACEHOLDER_ID]}
+                strategy={horizontalListSortingStrategy}
+            >
+                {/* {treeContainers.map((containerId) => (
+                ))} */}
+                {minimal ? undefined : (
+                    <DroppableContainer
+                        id={PLACEHOLDER_ID}
+                        disabled={isSortingTreeContainers}
+                        items={empty}
+                        onClick={handleAddTreeContainer}
+                        placeholder
+                    >
+                        + Add column
+                    </DroppableContainer>
+                )}
+            </SortableContext>
             {createPortal(
-                <DragOverlay
-                    adjustScale={adjustScale}
-                    dropAnimation={dropAnimation}
-                >
-                    {activeId
-                        ? containers.includes(activeId)
-                            ? renderContainerDragOverlay(activeId)
-                            : renderSortableItemDragOverlay(activeId)
+                <DragOverlay dropAnimation={dropAnimation}>
+                    {draggingId
+                        ? treeContainers.includes(draggingId)
+                            ? renderGridContainerDragOverlay(draggingId)
+                            : renderSortableGridItemDragOverlay(draggingId)
                         : null}
                 </DragOverlay>,
                 document.body,
             )}
-            {trashable && activeId && !containers.includes(activeId) ? (
+            {trashable && draggingId && !treeContainers.includes(draggingId) ? (
                 <Trash id={TRASH_ID} />
             ) : null}
         </DndContext>
     );
 
-    function renderSortableItemDragOverlay(id: UniqueIdentifier) {
-        return (
-            <Item
-                value={id}
-                handle={handle}
-                style={getItemStyles({
-                    containerId: findContainer(id) as UniqueIdentifier,
-                    overIndex: -1,
-                    index: getIndex(id),
-                    value: id,
-                    isSorting: true,
-                    isDragging: true,
-                    isDragOverlay: true,
-                })}
-                color={getColor(id)}
-                wrapperStyle={wrapperStyle({ index: 0 })}
-                renderItem={renderItem}
-                dragOverlay
-            />
-        );
+    function handleDragStart({ active: { id: activeId } }: DragStartEvent) {
+        setDraggingId(activeId);
+        setDragOverId(activeId);
     }
 
-    function renderContainerDragOverlay(containerId: UniqueIdentifier) {
-        return (
-            <Container
-                label={`Column ${containerId}`}
-                columns={columns}
-                style={{
-                    height: '100%',
-                }}
-                shadow
-                unstyled={false}
-            >
-                {items[containerId].map((item, index) => (
-                    <Item
-                        key={item}
-                        value={item}
-                        handle={handle}
-                        style={getItemStyles({
-                            containerId,
-                            overIndex: -1,
-                            index: getIndex(item),
-                            value: item,
-                            isDragging: false,
-                            isSorting: false,
-                            isDragOverlay: false,
-                        })}
-                        color={getColor(item)}
-                        wrapperStyle={wrapperStyle({ index })}
-                        renderItem={renderItem}
-                    />
-                ))}
-            </Container>
-        );
+    function handleDragMove({ delta }: DragMoveEvent) {
+        if (dragOverContainerAndItem?.containerType === 'tree') {
+            setDraggingOffsetLeft(delta.x);
+        } else {
+            setDraggingOffsetLeft(0);
+        }
     }
 
-    function handleRemove(containerID: UniqueIdentifier) {
-        setContainers((containers) =>
-            containers.filter((id) => id !== containerID),
-        );
+    function handleDragOver({ over }: DragOverEvent) {
+        const overId = over?.id;
+        setDragOverId(overId);
     }
 
-    function handleAddColumn() {
-        const newContainerId = getNextContainerId();
-
-        unstable_batchedUpdates(() => {
-            setContainers((containers) => [...containers, newContainerId]);
-            setItems((items) => ({
-                ...items,
-                [newContainerId]: [],
-            }));
-        });
+    function handleDragCancel(event: DragCancelEvent) {
+        setDraggingId(undefined);
+        setDragOverId(undefined);
+        setDragData(undefined);
     }
 
-    function getNextContainerId() {
-        const containerIds = Object.keys(items);
-        const lastContainerId = containerIds[containerIds.length - 1];
+    function handleDragEnd({ active, over }: DragEndEvent) {
+        if (over) {
+            // if (overId === PLACEHOLDER_ID) {
+            //     const newContainerId = getNextContainerId();
 
-        return String.fromCharCode(lastContainerId.charCodeAt(0) + 1);
+            //     unstable_batchedUpdates(() => {
+            //         setContainers((containers) => [...containers, newContainerId]);
+            //         setItems((items) => ({
+            //             ...items,
+            //             [activeContainer]: items[activeContainer].filter(
+            //                 (id) => id !== activeId,
+            //             ),
+            //             [newContainerId]: [active.id],
+            //         }));
+            //         setActiveId(null);
+            //     });
+            //     return;
+            // }
+            const fromContainer = {
+                containerId: draggingContainerAndItem!.containerId,
+                containerType: draggingContainerAndItem!.containerType,
+            };
+            const fromData = (
+                draggingContainerAndItem!.containerType === 'tree'
+                    ? nestFlattenedNodes
+                    : simplifyFlattenedNodes
+            )(dragData![draggingContainerAndItem!.containerId]);
+            const toContainer = {
+                containerId: draggingContainerAndItem!.containerId,
+                containerType: draggingContainerAndItem!.containerType,
+            };
+            const toData = (
+                dragOverContainerAndItem!.containerType === 'tree'
+                    ? nestFlattenedNodes
+                    : simplifyFlattenedNodes
+            )(dragData![dragOverContainerAndItem!.containerId]);
+            onMoveItem({
+                from: {
+                    container: fromContainer,
+                    data: fromData,
+                },
+                to: {
+                    container: toContainer,
+                    data: toData,
+                },
+            });
+        }
+
+        setDraggingId(undefined);
+        setDragOverId(undefined);
+        setDragData(undefined);
     }
-}
 
-function getColor(id: UniqueIdentifier) {
-    switch (String(id)[0]) {
-        case 'A':
-            return '#7193f1';
-        case 'B':
-            return '#ffda6c';
-        case 'C':
-            return '#00bcd4';
-        case 'D':
-            return '#ef769f';
-    }
+    // function renderSortableGridItemDragOverlay(id: UniqueIdentifier) {
+    //     return (
+    //         <Item
+    //             value={id}
+    //             handle={handle}
+    //             style={getItemStyles({
+    //                 containerId: findContainerId(id) as UniqueIdentifier,
+    //                 overIndex: -1,
+    //                 index: getIndex(id),
+    //                 value: id,
+    //                 isSorting: true,
+    //                 isDragging: true,
+    //                 isDragOverlay: true,
+    //             })}
+    //             color={getColor(id)}
+    //             wrapperStyle={gridItemWrapperStyle({ index: 0 })}
+    //             renderItem={renderItem}
+    //             dragOverlay
+    //         />
+    //     );
+    // }
 
-    return undefined;
+    // function renderGridContainerDragOverlay(containerId: UniqueIdentifier) {
+    //     return (
+    //         <Container
+    //             label={`Column ${containerId}`}
+    //             columns={columns}
+    //             style={{
+    //                 height: '100%',
+    //             }}
+    //             shadow
+    //             unstyled={false}
+    //         >
+    //             {items.grid.map((item, index) => (
+    //                 <Item
+    //                     key={item}
+    //                     value={item}
+    //                     handle={handle}
+    //                     style={getItemStyles({
+    //                         containerId,
+    //                         overIndex: -1,
+    //                         index: getIndex(item),
+    //                         value: item,
+    //                         isDragging: false,
+    //                         isSorting: false,
+    //                         isDragOverlay: false,
+    //                     })}
+    //                     color={getColor(item)}
+    //                     wrapperStyle={gridItemWrapperStyle({ index })}
+    //                     renderItem={renderItem}
+    //                 />
+    //             ))}
+    //         </Container>
+    //     );
+    // }
+
+    // function handleRemove(containerID: UniqueIdentifier) {
+    //     setTreeContainers((containers) =>
+    //         containers.filter((id) => id !== containerID),
+    //     );
+    // }
+
+    // function handleAddTreeContainer() {
+    //     const newContainerId = getNextTreeContainerId();
+
+    //     unstable_batchedUpdates(() => {
+    //         setTreeContainers((containers) => [...containers, newContainerId]);
+    //         setItems((items) => ({
+    //             ...items,
+    //             trees: {
+    //                 ...items.trees,
+    //                 [newContainerId]: [],
+    //             },
+    //         }));
+    //     });
+    // }
+
+    // function getNextTreeContainerId() {
+    //     const containerIds = Object.keys(items.trees);
+    //     const lastContainerId = containerIds[containerIds.length - 1];
+
+    //     return String.fromCharCode(lastContainerId.charCodeAt(0) + 1);
+    // }
 }
 
 function Trash({ id }: { id: UniqueIdentifier }) {
@@ -682,7 +735,7 @@ interface SortableItemProps {
     wrapperStyle({ index }: { index: number }): React.CSSProperties;
 }
 
-function SortableItem({
+function SortableGridItem({
     disabled,
     id,
     index,
