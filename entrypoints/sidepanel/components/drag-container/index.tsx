@@ -2,30 +2,22 @@ import React, {
     useCallback,
     useEffect,
     useLayoutEffect,
-    useRef,
     useState,
 } from 'react';
-import { createPortal, unstable_batchedUpdates } from 'react-dom';
+import { createPortal } from 'react-dom';
 import {
     CancelDrop,
-    closestCenter,
-    pointerWithin,
-    rectIntersection,
-    CollisionDetection,
     DndContext,
     DragOverlay,
     DropAnimation,
-    getFirstCollision,
     KeyboardSensor,
     MouseSensor,
     TouchSensor,
-    Modifiers,
     useDroppable,
     UniqueIdentifier,
     useSensors,
     useSensor,
     MeasuringStrategy,
-    KeyboardCoordinateGetter,
     defaultDropAnimationSideEffects,
     closestCorners,
     DragStartEvent,
@@ -33,25 +25,29 @@ import {
     DragOverEvent,
     DragEndEvent,
     DragCancelEvent,
+    Modifier,
 } from '@dnd-kit/core';
 import {
     AnimateLayoutChanges,
     SortableContext,
     useSortable,
-    arrayMove,
     defaultAnimateLayoutChanges,
     verticalListSortingStrategy,
-    SortingStrategy,
     horizontalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { coordinateGetter as multipleContainersCoordinateGetter } from '../utils/multipleContainersKeyboardCoordinates';
 
 import { Item, Container, ContainerProps } from './components';
 
-import { createRange } from './create-range';
 import { NodeRendererProps } from 'react-arborist';
-import { omit } from '../../utils/framework';
+import { SortableTreeItem } from './components/SortableTree/components';
+
+const adjustTranslate: Modifier = ({ transform }) => {
+    return {
+        ...transform,
+        y: transform.y - 25,
+    };
+};
 
 const animateLayoutChanges: AnimateLayoutChanges = (args) =>
     defaultAnimateLayoutChanges({ ...args, wasDragging: true });
@@ -127,12 +123,13 @@ const dropAnimation: DropAnimation = {
 interface HierarchialNode<Value> {
     isExpanded: boolean;
     value: Value;
-    children: Record<UniqueIdentifier, HierarchialNode<Value>>;
+    children: Record<UniqueIdentifier, HierarchialNode<Value>> | undefined;
 }
 interface FlattenedHierarchialNode<Value>
-    extends Omit<HierarchialNode<Value>, 'children' | 'isExpanded'> {
+    extends Omit<HierarchialNode<Value>, 'children'> {
     id: UniqueIdentifier;
     depth: number;
+    allowsChildren: boolean;
     hiddenChildren:
         | Record<UniqueIdentifier, HierarchialNode<Value>>
         | undefined;
@@ -148,11 +145,13 @@ const flattenHierarchialNodes = <Value,>(
                 id,
                 depth,
                 value,
+                isExpanded,
+                allowsChildren: !!children,
                 hiddenChildren: isExpanded ? undefined : children,
             },
         ];
 
-        if (isExpanded) {
+        if (isExpanded && children) {
             result.push(...flattenHierarchialNodes<Value>(children, depth + 1));
         }
 
@@ -222,7 +221,9 @@ function hasChildId(
 ): boolean {
     return (
         id in children ||
-        Object.values(children).some((child) => hasChildId(id, child.children))
+        Object.values(children).some(
+            (child) => child.children && hasChildId(id, child.children),
+        )
     );
 }
 
@@ -239,6 +240,7 @@ interface Props<Value> {
         UniqueIdentifier,
         Record<UniqueIdentifier, HierarchialNode<Value>>
     >;
+    focusTreeId: UniqueIdentifier | undefined;
     listItems: Record<UniqueIdentifier, Value>;
     onMoveItem: (args: {
         from: {
@@ -254,13 +256,17 @@ interface Props<Value> {
                 | Record<UniqueIdentifier, HierarchialNode<Value>>;
         };
     }) => void;
+    onExpandChange: (treeId: UniqueIdentifier, isExpanded: boolean) => void;
+    onAddTreeContainer: () => void;
+    onRemove: (id: UniqueIdentifier) => void;
 }
 
 export const TRASH_ID = 'void';
 const GRID_CONTAINER_ID = 'grid-container';
 const LIST_CONTAINER_ID = 'list-container';
 const TREES_PLACEHOLDER_ID = 'tree-placeholder';
-const empty: UniqueIdentifier[] = [];
+const empty: Record<UniqueIdentifier, unknown> = {};
+const indentationWidth = 50;
 
 type FlattenedItems<Value> = Record<
     typeof GRID_CONTAINER_ID | typeof LIST_CONTAINER_ID | UniqueIdentifier,
@@ -273,6 +279,10 @@ export function DragContainer<Value>({
     trees,
     listItems,
     onMoveItem,
+    focusTreeId,
+    onExpandChange,
+    onAddTreeContainer,
+    onRemove,
 }: Props<Value>) {
     const findContainer = useCallback(
         (
@@ -298,8 +308,9 @@ export function DragContainer<Value>({
             const treeEntry = Object.entries(trees).find(
                 ([, nodes]) =>
                     id in nodes ||
-                    Object.values(nodes).some((node) =>
-                        hasChildId(id, node.children),
+                    Object.values(nodes).some(
+                        (node) =>
+                            node.children && hasChildId(id, node.children),
                     ),
             );
             if (treeEntry) {
@@ -316,31 +327,37 @@ export function DragContainer<Value>({
 
     const flattenedItems = useMemo<FlattenedItems<Value>>(
         () => ({
-            [GRID_CONTAINER_ID]: Object.entries(gridItems).map(
-                ([id, value]) => ({
-                    id,
-                    depth: 0,
-                    value,
-                    hiddenChildren: undefined,
-                }),
-            ),
+            [GRID_CONTAINER_ID]: Object.entries(gridItems).map<
+                FlattenedHierarchialNode<Value>
+            >(([id, value]) => ({
+                id,
+                depth: 0,
+                value,
+                allowsChildren: false,
+                isExpanded: false,
+                hiddenChildren: undefined,
+            })),
             ...Object.fromEntries(
                 Object.entries(trees).map(
                     ([treeContainerId, nodes]) =>
                         [
                             treeContainerId,
-                            flattenHierarchialNodes(nodes),
+                            flattenHierarchialNodes(
+                                nodes,
+                            ) satisfies FlattenedHierarchialNode<Value>[],
                         ] as const,
                 ),
             ),
-            [LIST_CONTAINER_ID]: Object.entries(listItems).map(
-                ([id, value]) => ({
-                    id,
-                    depth: 0,
-                    value,
-                    hiddenChildren: undefined,
-                }),
-            ),
+            [LIST_CONTAINER_ID]: Object.entries(listItems).map<
+                FlattenedHierarchialNode<Value>
+            >(([id, value]) => ({
+                id,
+                depth: 0,
+                value,
+                allowsChildren: false,
+                isExpanded: false,
+                hiddenChildren: undefined,
+            })),
         }),
         [gridItems, trees, listItems],
     );
@@ -379,6 +396,15 @@ export function DragContainer<Value>({
         () => findDragDataContainerAndItem(dragOverId),
         [dragOverId, findContainer],
     );
+    const isDraggingContainer =
+        draggingContainerAndItem !== undefined &&
+        draggingContainerAndItem.itemIndex < 0;
+    const isDragOverContainerATree =
+        draggingContainerAndItem !== undefined &&
+        !(
+            draggingContainerAndItem.containerId === GRID_CONTAINER_ID ||
+            draggingContainerAndItem.containerId === LIST_CONTAINER_ID
+        );
     const [draggingOffsetLeft, setDraggingOffsetLeft] = useState(0);
 
     useLayoutEffect(() => {
@@ -479,57 +505,134 @@ export function DragContainer<Value>({
             >
                 <SortableContext
                     items={Object.keys(gridItems)}
-                    strategy={strategy}
+                    strategy={horizontalListSortingStrategy}
                 >
                     {Object.entries(gridItems).map(([id, value], index) => {
                         return (
                             <SortableGridItem
-                                disabled={isSortingTreeContainers}
+                                disabled={isDraggingContainer}
                                 key={id}
                                 id={id}
                                 index={index}
-                                handle={handle}
-                                style={getItemStyles}
-                                wrapperStyle={gridItemWrapperStyle}
-                                renderItem={renderItem}
-                                containerId={GRID_CONTAINER_ID}
-                                getIndex={getIndex}
+                                handle
                             />
                         );
                     })}
                 </SortableContext>
             </DroppableContainer>
             <SortableContext
-                items={[...trees, PLACEHOLDER_ID]}
+                items={[...Object.keys(trees), TREES_PLACEHOLDER_ID]}
                 strategy={horizontalListSortingStrategy}
             >
-                {/* {treeContainers.map((containerId) => (
-                ))} */}
-                {minimal ? undefined : (
+                {Object.keys(trees).map((treeId) => {
+                    const flattenedTreeItems = flattenedItems[treeId] ?? [];
+                    // todo: memoize:
+                    const sortedIds = flattenedTreeItems.map((item) => item.id);
+                    return (
+                        <SortableContext
+                            key={treeId}
+                            items={sortedIds}
+                            strategy={verticalListSortingStrategy}
+                        >
+                            {flattenedTreeItems.map(
+                                ({
+                                    id,
+                                    depth,
+                                    value,
+                                    isExpanded,
+                                    allowsChildren,
+                                    hiddenChildren,
+                                }) => (
+                                    <SortableTreeItem
+                                        key={id}
+                                        id={id}
+                                        value={id.toString()}
+                                        depth={
+                                            id === draggingId && projected
+                                                ? projected.depth
+                                                : depth
+                                        }
+                                        indentationWidth={indentationWidth}
+                                        indicator
+                                        collapsed={
+                                            !isExpanded && allowsChildren
+                                        }
+                                        onCollapse={
+                                            allowsChildren
+                                                ? () =>
+                                                      onExpandChange(id, false)
+                                                : undefined
+                                        }
+                                        onRemove={() => onRemove(id)}
+                                    />
+                                ),
+                            )}
+                        </SortableContext>
+                    );
+                })}
+                {focusTreeId !== undefined ? undefined : (
                     <DroppableContainer
-                        id={PLACEHOLDER_ID}
-                        disabled={isSortingTreeContainers}
+                        id={TREES_PLACEHOLDER_ID}
+                        disabled={isDraggingContainer}
                         items={empty}
-                        onClick={handleAddTreeContainer}
+                        onClick={onAddTreeContainer}
                         placeholder
                     >
-                        + Add column
+                        + Add space
                     </DroppableContainer>
                 )}
             </SortableContext>
+            <DroppableContainer
+                key={LIST_CONTAINER_ID}
+                id={LIST_CONTAINER_ID}
+                columns={1}
+                items={listItems}
+                scrollable
+            >
+                <SortableContext
+                    items={Object.keys(listItems)}
+                    strategy={verticalListSortingStrategy}
+                >
+                    {Object.entries(gridItems).map(([id, value], index) => {
+                        return (
+                            <SortableGridItem
+                                disabled={isDraggingContainer}
+                                key={id}
+                                id={id}
+                                index={index}
+                                handle
+                            />
+                        );
+                    })}
+                </SortableContext>
+            </DroppableContainer>
             {createPortal(
-                <DragOverlay dropAnimation={dropAnimation}>
-                    {draggingId
-                        ? treeContainers.includes(draggingId)
-                            ? renderGridContainerDragOverlay(draggingId)
-                            : renderSortableGridItemDragOverlay(draggingId)
-                        : null}
+                <DragOverlay
+                    dropAnimation={dropAnimation}
+                    modifiers={
+                        isDragOverContainerATree ? [adjustTranslate] : undefined
+                    }
+                >
+                    {draggingId ? (
+                        isDraggingContainer ? (
+                            renderGridContainerDragOverlay(draggingId)
+                        ) : isDragOverContainerATree ? (
+                            <SortableTreeItem
+                                id={draggingId}
+                                depth={activeItem.depth}
+                                clone
+                                childCount={getChildCount(items, activeId) + 1}
+                                value={activeId.toString()}
+                                indentationWidth={indentationWidth}
+                            />
+                        ) : (
+                            <Item value={draggingId} handle dragOverlay />
+                        )
+                    ) : null}
                 </DragOverlay>,
                 document.body,
             )}
-            {trashable && draggingId && !treeContainers.includes(draggingId) ? (
-                <Trash id={TRASH_ID} />
-            ) : null}
+            {draggingId && <Trash id={TRASH_ID} />}
         </DndContext>
     );
 
@@ -610,61 +713,39 @@ export function DragContainer<Value>({
         setDragData(undefined);
     }
 
-    // function renderSortableGridItemDragOverlay(id: UniqueIdentifier) {
-    //     return (
-    //         <Item
-    //             value={id}
-    //             handle={handle}
-    //             style={getItemStyles({
-    //                 containerId: findContainerId(id) as UniqueIdentifier,
-    //                 overIndex: -1,
-    //                 index: getIndex(id),
-    //                 value: id,
-    //                 isSorting: true,
-    //                 isDragging: true,
-    //                 isDragOverlay: true,
-    //             })}
-    //             color={getColor(id)}
-    //             wrapperStyle={gridItemWrapperStyle({ index: 0 })}
-    //             renderItem={renderItem}
-    //             dragOverlay
-    //         />
-    //     );
-    // }
-
-    // function renderGridContainerDragOverlay(containerId: UniqueIdentifier) {
-    //     return (
-    //         <Container
-    //             label={`Column ${containerId}`}
-    //             columns={columns}
-    //             style={{
-    //                 height: '100%',
-    //             }}
-    //             shadow
-    //             unstyled={false}
-    //         >
-    //             {items.grid.map((item, index) => (
-    //                 <Item
-    //                     key={item}
-    //                     value={item}
-    //                     handle={handle}
-    //                     style={getItemStyles({
-    //                         containerId,
-    //                         overIndex: -1,
-    //                         index: getIndex(item),
-    //                         value: item,
-    //                         isDragging: false,
-    //                         isSorting: false,
-    //                         isDragOverlay: false,
-    //                     })}
-    //                     color={getColor(item)}
-    //                     wrapperStyle={gridItemWrapperStyle({ index })}
-    //                     renderItem={renderItem}
-    //                 />
-    //             ))}
-    //         </Container>
-    //     );
-    // }
+    function renderGridContainerDragOverlay(containerId: UniqueIdentifier) {
+        return (
+            <Container
+                label={`Column ${containerId}`}
+                columns={columns}
+                style={{
+                    height: '100%',
+                }}
+                shadow
+                unstyled={false}
+            >
+                {items.grid.map((item, index) => (
+                    <Item
+                        key={item}
+                        value={item}
+                        handle={handle}
+                        style={getItemStyles({
+                            containerId,
+                            overIndex: -1,
+                            index: getIndex(item),
+                            value: item,
+                            isDragging: false,
+                            isSorting: false,
+                            isDragOverlay: false,
+                        })}
+                        color={getColor(item)}
+                        wrapperStyle={gridItemWrapperStyle({ index })}
+                        renderItem={renderItem}
+                    />
+                ))}
+            </Container>
+        );
+    }
 
     // function handleRemove(containerID: UniqueIdentifier) {
     //     setTreeContainers((containers) =>
@@ -724,36 +805,19 @@ function Trash({ id }: { id: UniqueIdentifier }) {
 }
 
 interface SortableItemProps {
-    containerId: UniqueIdentifier;
     id: UniqueIdentifier;
     index: number;
     handle: boolean;
     disabled?: boolean;
-    style(args: any): React.CSSProperties;
-    getIndex(id: UniqueIdentifier): number;
-    renderItem(): React.ReactElement;
-    wrapperStyle({ index }: { index: number }): React.CSSProperties;
 }
 
-function SortableGridItem({
-    disabled,
-    id,
-    index,
-    handle,
-    renderItem,
-    style,
-    containerId,
-    getIndex,
-    wrapperStyle,
-}: SortableItemProps) {
+function SortableGridItem({ disabled, id, index, handle }: SortableItemProps) {
     const {
         setNodeRef,
         setActivatorNodeRef,
         listeners,
         isDragging,
         isSorting,
-        over,
-        overIndex,
         transform,
         transition,
     } = useSortable({
@@ -771,21 +835,10 @@ function SortableGridItem({
             handle={handle}
             handleProps={handle ? { ref: setActivatorNodeRef } : undefined}
             index={index}
-            wrapperStyle={wrapperStyle({ index })}
-            style={style({
-                index,
-                value: id,
-                isDragging,
-                isSorting,
-                overIndex: over ? getIndex(over.id) : overIndex,
-                containerId,
-            })}
-            color={getColor(id)}
             transition={transition}
             transform={transform}
             fadeIn={mountedWhileDragging}
             listeners={listeners}
-            renderItem={renderItem}
         />
     );
 }

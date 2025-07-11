@@ -22,22 +22,8 @@ export interface Props {
     sorting?: boolean;
     style?: React.CSSProperties;
     transition?: string | null;
-    wrapperStyle?: React.CSSProperties;
     value: React.ReactNode;
     onRemove?(): void;
-    renderItem?(args: {
-        dragOverlay: boolean;
-        dragging: boolean;
-        sorting: boolean;
-        index: number | undefined;
-        fadeIn: boolean;
-        listeners: DraggableSyntheticListeners;
-        ref: React.Ref<HTMLElement>;
-        style: React.CSSProperties | undefined;
-        transform: Props['transform'];
-        transition: Props['transition'];
-        value: Props['value'];
-    }): React.ReactElement;
 }
 
 export const Item = React.memo(
@@ -55,13 +41,11 @@ export const Item = React.memo(
                 index,
                 listeners,
                 onRemove,
-                renderItem,
                 sorting,
                 style,
                 transition,
                 transform,
                 value,
-                wrapperStyle,
                 ...props
             },
             ref,
@@ -78,21 +62,7 @@ export const Item = React.memo(
                 };
             }, [dragOverlay]);
 
-            return renderItem ? (
-                renderItem({
-                    dragOverlay: Boolean(dragOverlay),
-                    dragging: Boolean(dragging),
-                    sorting: Boolean(sorting),
-                    index,
-                    fadeIn: Boolean(fadeIn),
-                    listeners,
-                    ref,
-                    style,
-                    transform,
-                    transition,
-                    value,
-                })
-            ) : (
+            return (
                 <li
                     className={classNames(
                         styles.Wrapper,
@@ -102,10 +72,7 @@ export const Item = React.memo(
                     )}
                     style={
                         {
-                            ...wrapperStyle,
-                            transition: [transition, wrapperStyle?.transition]
-                                .filter(Boolean)
-                                .join(', '),
+                            transition,
                             '--translate-x': transform
                                 ? `${Math.round(transform.x)}px`
                                 : undefined,
