@@ -6,7 +6,7 @@ import {
     DroppableContainer,
 } from '@dnd-kit/core';
 
-import type { SensorContext } from './types';
+import type { TreeSensorContext } from './types';
 import { getProjection } from './utilities';
 
 const directions: string[] = [
@@ -19,7 +19,7 @@ const directions: string[] = [
 const horizontal: string[] = [KeyboardCode.Left, KeyboardCode.Right];
 
 export const sortableTreeKeyboardCoordinates: (
-    context: SensorContext,
+    context: TreeSensorContext,
     indicator: boolean,
     indentationWidth: number
 ) => KeyboardCoordinateGetter = (context, indicator, indentationWidth) => (

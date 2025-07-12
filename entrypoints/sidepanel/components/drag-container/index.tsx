@@ -10,11 +10,9 @@ import {
     DndContext,
     DragOverlay,
     DropAnimation,
-    KeyboardSensor,
     MouseSensor,
     TouchSensor,
     useDroppable,
-    UniqueIdentifier,
     useSensors,
     useSensor,
     MeasuringStrategy,
@@ -22,6 +20,7 @@ import {
     closestCorners,
     DragStartEvent,
     DragMoveEvent,
+    UniqueIdentifier,
     DragOverEvent,
     DragEndEvent,
     DragCancelEvent,
@@ -37,10 +36,18 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-import { Item, Container, ContainerProps } from './components';
+import { Item, Container, ContainerProps, Remove } from './components';
 
-import { NodeRendererProps } from 'react-arborist';
 import { SortableTreeItem } from './components/SortableTree/components';
+import { useAssignedRef } from '../../hooks/use-assigned-ref';
+import { getProjection } from './get-projection';
+import { FlattenedHierarchialNode, HierarchialNode } from './types';
+import { ExpandCollapseButton } from './components/SortableTree/components/TreeItem/ExpandCollapseButton';
+import { TreeItemText } from './components/SortableTree/components/TreeItem/TreeItemText';
+
+import treeItemStyles from './components/SortableTree/components/TreeItem/TreeItem.module.css';
+
+const INDENT_WIDTH = 50;
 
 const adjustTranslate: Modifier = ({ transform }) => {
     return {
@@ -120,143 +127,208 @@ const dropAnimation: DropAnimation = {
     }),
 };
 
-interface HierarchialNode<Value> {
-    isExpanded: boolean;
-    value: Value;
-    children: Record<UniqueIdentifier, HierarchialNode<Value>> | undefined;
-}
-interface FlattenedHierarchialNode<Value>
-    extends Omit<HierarchialNode<Value>, 'children'> {
-    id: UniqueIdentifier;
-    depth: number;
-    allowsChildren: boolean;
-    hiddenChildren:
-        | Record<UniqueIdentifier, HierarchialNode<Value>>
-        | undefined;
-}
+const getDescendentCount = <Value,>(
+    nodes: Record<UniqueIdentifier, HierarchialNode<Value>>,
+): number => {
+    let result = Object.keys(nodes).length;
+    Object.values(nodes).forEach((node) => {
+        if (node.children) {
+            result += getDescendentCount(node.children);
+        }
+    });
+    return result;
+};
 
 const flattenHierarchialNodes = <Value,>(
     nodes: Record<UniqueIdentifier, HierarchialNode<Value>>,
+    draggingId: UniqueIdentifier | undefined,
     depth = 0,
 ): FlattenedHierarchialNode<Value>[] =>
-    Object.entries(nodes).flatMap(([id, { isExpanded, value, children }]) => {
+    Object.entries(nodes).flatMap(([id, node]) => {
+        const { isExpanded, children, value } = node;
         const result: FlattenedHierarchialNode<Value>[] = [
             {
+                ...node,
                 id,
                 depth,
                 value,
-                isExpanded,
                 allowsChildren: !!children,
-                hiddenChildren: isExpanded ? undefined : children,
+                isExpanded,
             },
         ];
 
-        if (isExpanded && children) {
-            result.push(...flattenHierarchialNodes<Value>(children, depth + 1));
+        if (isExpanded && children && draggingId !== id) {
+            result.push(
+                ...flattenHierarchialNodes<Value>(
+                    children,
+                    draggingId,
+                    depth + 1,
+                ),
+            );
         }
 
         return result;
     });
 
-const nestFlattenedNodes = <Value,>(
-    flattenedNodes: FlattenedHierarchialNode<Value>[],
-    minDepth = 0,
-): Record<UniqueIdentifier, HierarchialNode<Value>> => {
-    const nodes: Record<UniqueIdentifier, HierarchialNode<Value>> = {};
-    for (let i = 0; i < flattenedNodes.length; i++) {
-        const { id, depth, value, hiddenChildren } = flattenedNodes[i];
-        if (depth < minDepth) {
-            return nodes;
-        }
-
-        const candidateNestedNodesNextIndex = hiddenChildren
-            ? -1
-            : flattenedNodes.findIndex(
-                  (candidate, n) => n > i && candidate.depth <= minDepth,
+const updateTreeNodes = <Value,>(
+    nodes: Record<UniqueIdentifier, HierarchialNode<Value>>,
+    destinationRef: {
+        type: 'before' | 'child' | 'after';
+        id: UniqueIdentifier;
+    },
+    moveId: UniqueIdentifier,
+    moveValue: HierarchialNode<Value>,
+): Record<UniqueIdentifier, HierarchialNode<Value>> =>
+    destinationRef.id === moveId
+        ? nodes
+        : Object.entries(nodes)
+              .filter(([id]) => id !== moveId)
+              .reduce(
+                  (acc, [id, node]) => {
+                      if (id !== moveId) {
+                          if (
+                              destinationRef.type === 'before' &&
+                              id === destinationRef.id
+                          ) {
+                              acc[moveId] = moveValue;
+                          }
+                          acc[id] = {
+                              ...node,
+                              children:
+                                  destinationRef.type === 'child' &&
+                                  id === destinationRef.id
+                                      ? {
+                                            [moveId]: moveValue,
+                                            ...(node.children ?? {}),
+                                        }
+                                      : node.children &&
+                                        updateTreeNodes(
+                                            node.children,
+                                            destinationRef,
+                                            moveId,
+                                            moveValue,
+                                        ),
+                          };
+                          if (
+                              destinationRef.type === 'after' &&
+                              id === destinationRef.id
+                          ) {
+                              acc[moveId] = moveValue;
+                          }
+                      }
+                      return acc;
+                  },
+                  {} as Record<UniqueIdentifier, HierarchialNode<Value>>,
               );
+const removeTreeNode = <Value,>(
+    nodes: Record<UniqueIdentifier, HierarchialNode<Value>>,
+    id: UniqueIdentifier,
+): Record<UniqueIdentifier, HierarchialNode<Value>> =>
+    updateTreeNodes(
+        nodes,
+        { type: 'after', id: Infinity },
+        id,
+        undefined as any,
+    );
 
-        nodes[id] = {
-            isExpanded: hiddenChildren === undefined,
-            value,
-            children:
-                hiddenChildren ??
-                (candidateNestedNodesNextIndex > i
-                    ? nestFlattenedNodes(
-                          flattenedNodes.slice(
-                              i + 1,
-                              candidateNestedNodesNextIndex,
-                          ),
-                          depth + 1,
-                      )
-                    : {}),
+const updateListNodes = <Value,>(
+    dragOverNodes: Record<UniqueIdentifier, Value>,
+    dragOverId: UniqueIdentifier,
+    draggedId: UniqueIdentifier,
+    draggedValue: Value,
+    isBefore: boolean,
+): Record<UniqueIdentifier, Value> =>
+    dragOverId === draggedId
+        ? dragOverNodes
+        : Object.entries(dragOverNodes).reduce(
+              (acc, [id, value]) => {
+                  if (id !== draggedId) {
+                      if (isBefore && id === dragOverId) {
+                          acc[draggedId] = draggedValue;
+                      }
+                      acc[id] = value;
+                      if (!isBefore && id === dragOverId) {
+                          acc[draggedId] = draggedValue;
+                      }
+                  }
+                  return acc;
+              },
+              {} as Record<UniqueIdentifier, Value>,
+          );
+const removeListNode = <Value,>(
+    nodes: Record<UniqueIdentifier, Value>,
+    id: UniqueIdentifier,
+): Record<UniqueIdentifier, Value> =>
+    updateListNodes(nodes, Infinity, id, undefined as any, false);
+
+const findInTreeNodes = <Value,>(
+    nodes: Record<UniqueIdentifier, HierarchialNode<Value>>,
+    id: UniqueIdentifier,
+    indexRef: { current: number },
+):
+    | {
+          itemId: UniqueIdentifier;
+          path: UniqueIdentifier[];
+          item: HierarchialNode<Value>;
+      }
+    | undefined => {
+    if (id in nodes) {
+        indexRef.current +=
+            (Object.keys(nodes) as UniqueIdentifier[]).indexOf(id) + 1;
+        return {
+            itemId: id,
+            path: [id],
+            item: nodes[id],
         };
-        i = candidateNestedNodesNextIndex - 1;
     }
-    return nodes;
+    for (const [childId, node] of Object.entries(nodes)) {
+        indexRef.current++;
+        const childResult =
+            node.children && findInTreeNodes(node.children, id, indexRef);
+        if (childResult) {
+            childResult.path.unshift(childId);
+            return childResult;
+        }
+    }
+    return undefined;
 };
 
-const simplifyFlattenedNodes = <Value,>(
-    flattenedNodes: FlattenedHierarchialNode<Value>[],
-): Record<UniqueIdentifier, Value> =>
-    flattenedNodes.reduce(
-        (acc, { id, depth, hiddenChildren, value }) => {
-            if (depth > 0 || hiddenChildren !== undefined) {
-                throw new Error(
-                    'Cannot simplify flattened nodes with depth > 0 or hidden children',
-                );
-            }
-            acc[id] = value;
-            return acc;
-        },
-        {} as Record<UniqueIdentifier, Value>,
-    );
+const itemTypeToContainerTypeMap = {
+    'grid-item': 'grid',
+    'list-item': 'list',
+    'tree-item': 'tree',
+} as const;
 
-type ItemRenderer<Value> = React.ComponentType<
-    NodeRendererProps<{ id: UniqueIdentifier; value: Value }>
->;
-
-function hasChildId(
-    id: UniqueIdentifier,
-    children: Record<UniqueIdentifier, HierarchialNode<any>>,
-): boolean {
-    return (
-        id in children ||
-        Object.values(children).some(
-            (child) => child.children && hasChildId(id, child.children),
-        )
-    );
-}
-
-interface ContainerRef {
+interface SourceRef<ContainerType, Data> {
     containerId: UniqueIdentifier;
-    containerType: 'grid' | 'tree' | 'list';
+    containerType: ContainerType;
+    data: Data;
 }
 
-interface Props<Value> {
-    cancelDrop?: CancelDrop;
-    containerStyle?: React.CSSProperties;
+type HyperTreeMoveEntry<Value> =
+    | SourceRef<'grid' | 'list', Record<UniqueIdentifier, Value>>
+    | SourceRef<'tree', Record<UniqueIdentifier, HierarchialNode<Value>>>;
+
+export type HyperTreeMoveItemHandler<Value> = (args: {
+    from: HyperTreeMoveEntry<Value>;
+    to: HyperTreeMoveEntry<Value>;
+}) => void;
+
+export interface HyperTreeProps<Value> {
     gridItems: Record<UniqueIdentifier, Value>;
     trees: Record<
         UniqueIdentifier,
         Record<UniqueIdentifier, HierarchialNode<Value>>
     >;
-    focusTreeId: UniqueIdentifier | undefined;
+    restrictToTreeId: UniqueIdentifier | undefined;
     listItems: Record<UniqueIdentifier, Value>;
-    onMoveItem: (args: {
-        from: {
-            container: ContainerRef;
-            data:
-                | Record<UniqueIdentifier, Value>
-                | Record<UniqueIdentifier, HierarchialNode<Value>>;
-        };
-        to: {
-            container: ContainerRef;
-            data:
-                | Record<UniqueIdentifier, Value>
-                | Record<UniqueIdentifier, HierarchialNode<Value>>;
-        };
-    }) => void;
-    onExpandChange: (treeId: UniqueIdentifier, isExpanded: boolean) => void;
+    focussedItemId: UniqueIdentifier | undefined;
+    onMoveItem: HyperTreeMoveItemHandler<Value>;
+    onTreeItemExpandChange: (
+        treeId: UniqueIdentifier,
+        itemId: UniqueIdentifier,
+        isExpanded: boolean,
+    ) => void;
     onAddTreeContainer: () => void;
     onRemove: (id: UniqueIdentifier) => void;
 }
@@ -266,63 +338,128 @@ const GRID_CONTAINER_ID = 'grid-container';
 const LIST_CONTAINER_ID = 'list-container';
 const TREES_PLACEHOLDER_ID = 'tree-placeholder';
 const empty: Record<UniqueIdentifier, unknown> = {};
-const indentationWidth = 50;
 
 type FlattenedItems<Value> = Record<
     typeof GRID_CONTAINER_ID | typeof LIST_CONTAINER_ID | UniqueIdentifier,
     FlattenedHierarchialNode<Value>[]
 >;
 
-export function DragContainer<Value>({
-    cancelDrop,
+type FindContainerAndItemResult<Value> = {
+    containerId: UniqueIdentifier;
+    itemId: UniqueIdentifier;
+    flattenedIndex: number;
+} & (
+    | {
+          type: 'grid-item' | 'list-item';
+          value: Value;
+      }
+    | {
+          type: 'tree-item';
+          path: UniqueIdentifier[];
+          item: HierarchialNode<Value>;
+      }
+);
+
+export function HyperTree<Value>({
     gridItems,
     trees,
+    restrictToTreeId,
     listItems,
+    focussedItemId,
     onMoveItem,
-    focusTreeId,
-    onExpandChange,
+    onTreeItemExpandChange,
     onAddTreeContainer,
     onRemove,
-}: Props<Value>) {
-    const findContainer = useCallback(
+}: HyperTreeProps<Value>) {
+    const findContainerAndItem = useCallback(
         (
             id: UniqueIdentifier,
         ):
             | {
+                  type: 'container';
                   containerId: UniqueIdentifier;
-                  containerType: 'grid' | 'tree' | 'list';
+                  containerType: 'grid' | 'list' | 'tree';
               }
-            | undefined => {
-            if (id === GRID_CONTAINER_ID) {
+            | FindContainerAndItemResult<Value> => {
+            if (
+                id === GRID_CONTAINER_ID ||
+                id === LIST_CONTAINER_ID ||
+                id in trees
+            ) {
                 return {
-                    containerId: GRID_CONTAINER_ID,
-                    containerType: 'grid',
-                };
-            } else if (id === LIST_CONTAINER_ID) {
-                return {
-                    containerId: LIST_CONTAINER_ID,
-                    containerType: 'list',
+                    type: 'container',
+                    containerId: id,
+                    containerType:
+                        id === GRID_CONTAINER_ID
+                            ? 'grid'
+                            : id === LIST_CONTAINER_ID
+                              ? 'list'
+                              : 'tree',
                 };
             }
 
-            const treeEntry = Object.entries(trees).find(
-                ([, nodes]) =>
-                    id in nodes ||
-                    Object.values(nodes).some(
-                        (node) =>
-                            node.children && hasChildId(id, node.children),
-                    ),
+            const indexRef = { current: -1 };
+            for (const [containerId, items] of [
+                [GRID_CONTAINER_ID, gridItems] as const,
+                [LIST_CONTAINER_ID, listItems] as const,
+            ]) {
+                indexRef.current++;
+                if (id in items) {
+                    return {
+                        type:
+                            id === GRID_CONTAINER_ID
+                                ? 'grid-item'
+                                : 'list-item',
+                        containerId,
+                        itemId: id,
+                        value: items[id],
+                        flattenedIndex: indexRef.current,
+                    };
+                }
+            }
+
+            for (const [treeContainerId, nodes] of Object.entries(trees)) {
+                const treeResult = findInTreeNodes(nodes, id, indexRef);
+                if (treeResult) {
+                    return {
+                        type: 'tree-item',
+                        containerId: treeContainerId,
+                        flattenedIndex: indexRef.current,
+                        ...treeResult,
+                    };
+                }
+            }
+
+            throw new Error(
+                `Item with id ${id} not found for or in any container`,
             );
-            if (treeEntry) {
-                return {
-                    containerId: treeEntry[0],
-                    containerType: 'tree',
-                };
-            }
-
-            return undefined;
         },
-        [trees],
+        [gridItems, listItems, trees],
+    );
+
+    const [draggingId, setDraggingId] = useState<UniqueIdentifier>();
+    const [dragOverId, setDragOverId] = useState<UniqueIdentifier>();
+    const draggingContainerAndItem = useMemo(() => {
+        if (draggingId === undefined) {
+            return undefined;
+        }
+        const result = findContainerAndItem(draggingId);
+        return result;
+    }, [draggingId, findContainerAndItem]);
+    const dragOverContainerAndItem = useMemo(() => {
+        if (dragOverId === undefined) {
+            return undefined;
+        }
+        const result = findContainerAndItem(dragOverId);
+        return result;
+    }, [dragOverId, findContainerAndItem]);
+    const draggingDescendentCount = useMemo(
+        () =>
+            draggingContainerAndItem?.type === 'tree-item' &&
+            draggingContainerAndItem.item.children
+                ? getDescendentCount(draggingContainerAndItem.item.children)
+                : 0,
+        [draggingContainerAndItem, draggingContainerAndItem?.type],
     );
 
     const flattenedItems = useMemo<FlattenedItems<Value>>(
@@ -335,7 +472,6 @@ export function DragContainer<Value>({
                 value,
                 allowsChildren: false,
                 isExpanded: false,
-                hiddenChildren: undefined,
             })),
             ...Object.fromEntries(
                 Object.entries(trees).map(
@@ -344,6 +480,7 @@ export function DragContainer<Value>({
                             treeContainerId,
                             flattenHierarchialNodes(
                                 nodes,
+                                draggingId,
                             ) satisfies FlattenedHierarchialNode<Value>[],
                         ] as const,
                 ),
@@ -356,129 +493,211 @@ export function DragContainer<Value>({
                 value,
                 allowsChildren: false,
                 isExpanded: false,
-                hiddenChildren: undefined,
             })),
         }),
-        [gridItems, trees, listItems],
+        [gridItems, trees, listItems, draggingId],
     );
 
-    const [dragData, setDragData] = useState<FlattenedItems<Value>>();
-
-    const findDragDataContainerAndItem = useCallback(
-        (id: UniqueIdentifier | undefined) => {
-            if (!id) {
-                return undefined;
-            }
-
-            const c = findContainer(id)!;
-            const items: FlattenedHierarchialNode<Value>[] = (dragData as any)[
-                c.containerId
-            ];
-
-            const itemIndex = items.findIndex((item) => item.id === id);
-            return {
-                containerId: c.containerId,
-                containerType: c.containerType,
-                item: items[itemIndex],
-                itemIndex,
-            };
-        },
-        [findContainer, dragData],
-    );
-
-    const [draggingId, setDraggingId] = useState<UniqueIdentifier>();
-    const [dragOverId, setDragOverId] = useState<UniqueIdentifier>();
-    const draggingContainerAndItem = useMemo(
-        () => findDragDataContainerAndItem(draggingId),
-        [draggingId, findContainer],
-    );
-    const dragOverContainerAndItem = useMemo(
-        () => findDragDataContainerAndItem(dragOverId),
-        [dragOverId, findContainer],
-    );
-    const isDraggingContainer =
-        draggingContainerAndItem !== undefined &&
-        draggingContainerAndItem.itemIndex < 0;
-    const isDragOverContainerATree =
-        draggingContainerAndItem !== undefined &&
-        !(
-            draggingContainerAndItem.containerId === GRID_CONTAINER_ID ||
-            draggingContainerAndItem.containerId === LIST_CONTAINER_ID
-        );
-    const [draggingOffsetLeft, setDraggingOffsetLeft] = useState(0);
-
-    useLayoutEffect(() => {
-        if (
-            dragOverId === undefined ||
-            dragOverId === TRASH_ID ||
-            draggingId === undefined ||
-            draggingContainerAndItem === undefined ||
-            dragOverContainerAndItem === undefined
-        ) {
-            return;
-        }
-
-        setDragData((prevDragData) => {
-            const dragData = prevDragData ?? flattenedItems;
-            return Object.fromEntries(
-                Object.entries(dragData).map(([containerId, items]) => {
-                    if (containerId === dragOverContainerAndItem.containerId) {
-                        return [
-                            containerId,
-                            items.flatMap((item) => {
-                                const itemResult = [];
-                                if (item.id !== draggingId) {
-                                    itemResult.push(item);
-                                }
-                                if (item.id === dragOverId) {
-                                    return [
-                                        {
-                                            ...item,
-                                            depth:
-                                                dragOverContainerAndItem.item
-                                                    .depth + 1,
-                                        },
-                                    ];
-                                }
-                                return itemResult;
-                            }),
-                        ];
-                    } else if (
-                        containerId === draggingContainerAndItem.containerId
-                    ) {
-                        return [
-                            containerId,
-                            items.filter((item) => item.id !== draggingId),
-                        ];
-                    } else {
-                        return [containerId, items];
-                    }
-                }),
-            );
-        });
-    }, [
-        dragOverId,
-        draggingId,
-        draggingContainerAndItem,
-        dragOverContainerAndItem,
-        flattenedItems,
-    ]);
-
-    const [coordinateGetter] = useState(() =>
-        sortableTreeKeyboardCoordinates(
-            sensorContext,
-            indicator,
-            indentationWidth,
+    const [treeDragOverOffsetLeft, setDraggingOffsetLeft] = useState(0);
+    const dropTargetDepth =
+        dragOverContainerAndItem?.type === 'tree-item'
+            ? dragOverContainerAndItem.path.length - 1
+            : 0;
+    const dragDepth = Math.max(
+        dropTargetDepth,
+        Math.min(
+            dragOverContainerAndItem?.type === 'tree-item'
+                ? dragOverContainerAndItem.item.children === undefined
+                    ? dropTargetDepth // max depth restricted to being a sibling of the drop target
+                    : dropTargetDepth + 1 // max depth restricted to being a child of the drop target
+                : 0,
+            Math.round(treeDragOverOffsetLeft / INDENT_WIDTH), // depth based on offset
         ),
     );
 
     const sensors = useSensors(
         useSensor(MouseSensor),
         useSensor(TouchSensor),
-        useSensor(KeyboardSensor, {
-            coordinateGetter,
-        }),
+        // useSensor(KeyboardSensor, {
+        //     coordinateGetter,
+        // }),
     );
+
+    const handleDragStart = useCallback(
+        ({ active: { id: activeId } }: DragStartEvent) => {
+            console.log('drag start', activeId);
+            setDraggingId(activeId);
+            setDragOverId(activeId);
+        },
+        [],
+    );
+
+    const handleDragMove = useCallback(
+        ({ delta }: DragMoveEvent) => {
+            console.log('drag move', delta);
+            if (dragOverContainerAndItem?.type === 'tree-item') {
+                setDraggingOffsetLeft(delta.x);
+            } else {
+                setDraggingOffsetLeft(0);
+            }
+        },
+        [dragOverContainerAndItem],
+    );
+
+    const handleDragOver = useCallback(({ over }: DragOverEvent) => {
+        console.log('drag over', over?.id);
+        const overId = over?.id;
+        setDragOverId(overId);
+    }, []);
+
+    const handleDragCancel = useCallback((event: DragCancelEvent) => {
+        console.log('drag cancel');
+        setDraggingId(undefined);
+        setDragOverId(undefined);
+    }, []);
+
+    const withData = useCallback(
+        <
+            R extends FindContainerAndItemResult<Value>,
+            Data extends R['type'] extends 'tree-item'
+                ? Record<UniqueIdentifier, HierarchialNode<Value>>
+                : Record<UniqueIdentifier, Value>,
+        >(
+            r: R,
+            d: Data,
+        ): HyperTreeMoveEntry<Value> =>
+            ({
+                containerId: r.containerId,
+                containerType: itemTypeToContainerTypeMap[r.type],
+                data: d,
+            }) as any,
+        [],
+    );
+
+    const handleDragEnd = useCallback(
+        ({ active, over }: DragEndEvent) => {
+            if (over) {
+                if (draggingContainerAndItem === undefined) {
+                    console.warn(
+                        'Dragging container and item not found for active id:',
+                        draggingContainerAndItem,
+                    );
+                    return;
+                }
+                if (dragOverContainerAndItem === undefined) {
+                    console.warn(
+                        'Drag over container and item not found for over id:',
+                        dragOverContainerAndItem,
+                    );
+                    return;
+                }
+
+                if (
+                    draggingContainerAndItem.type === 'container' ||
+                    dragOverContainerAndItem.type === 'container'
+                ) {
+                    console.warn('Container drag over not implemented');
+                    return;
+                }
+
+                const isSameContainer =
+                    draggingContainerAndItem.type ===
+                        dragOverContainerAndItem.type &&
+                    draggingContainerAndItem.containerId ===
+                        dragOverContainerAndItem.containerId;
+
+                const isBefore =
+                    dragOverContainerAndItem.flattenedIndex <
+                    draggingContainerAndItem.flattenedIndex;
+
+                console.log({
+                    isBefore,
+                    dragDepth,
+                    dragOverContainerAndItem,
+                    draggingContainerAndItem,
+                });
+
+                const to =
+                    dragOverContainerAndItem.type === 'tree-item'
+                        ? withData(
+                              dragOverContainerAndItem,
+                              updateTreeNodes<Value>(
+                                  trees[dragOverContainerAndItem.containerId],
+                                  dragDepth >
+                                      dragOverContainerAndItem.path.length - 1
+                                      ? {
+                                            type: 'child',
+                                            id: dragOverContainerAndItem.itemId,
+                                        }
+                                      : {
+                                            type: isBefore ? 'before' : 'after',
+                                            id: dragOverContainerAndItem.itemId,
+                                        },
+                                  draggingContainerAndItem.itemId,
+                                  draggingContainerAndItem.type === 'tree-item'
+                                      ? draggingContainerAndItem.item
+                                      : {
+                                            children: undefined,
+                                            isExpanded: false,
+                                            value: draggingContainerAndItem.value,
+                                        },
+                              ),
+                          )
+                        : withData(
+                              dragOverContainerAndItem,
+                              updateListNodes<Value>(
+                                  dragOverContainerAndItem.type === 'grid-item'
+                                      ? gridItems
+                                      : listItems,
+                                  dragOverContainerAndItem.itemId,
+                                  draggingContainerAndItem.itemId,
+                                  draggingContainerAndItem.type === 'tree-item'
+                                      ? draggingContainerAndItem.item.value
+                                      : draggingContainerAndItem.value,
+                                  isBefore,
+                              ),
+                          );
+                const from = isSameContainer
+                    ? to
+                    : draggingContainerAndItem.type === 'tree-item'
+                      ? withData(
+                            draggingContainerAndItem,
+                            removeTreeNode<Value>(
+                                trees[draggingContainerAndItem.containerId],
+                                draggingContainerAndItem.itemId,
+                            ),
+                        )
+                      : withData(
+                            draggingContainerAndItem,
+                            removeListNode<Value>(
+                                draggingContainerAndItem.type === 'grid-item'
+                                    ? gridItems
+                                    : listItems,
+                                draggingContainerAndItem.itemId,
+                            ),
+                        );
+                onMoveItem({
+                    from,
+                    to,
+                });
+            }
+
+            setDraggingId(undefined);
+            setDragOverId(undefined);
+        },
+        [
+            draggingContainerAndItem,
+            dragOverContainerAndItem,
+            dragDepth,
+            onMoveItem,
+            gridItems,
+            listItems,
+            trees,
+            withData,
+        ],
+    );
+
+    const isDraggingContainer = draggingContainerAndItem?.type === 'container';
 
     return (
         <DndContext
@@ -494,8 +713,11 @@ export function DragContainer<Value>({
             onDragOver={handleDragOver}
             onDragEnd={handleDragEnd}
             onDragCancel={handleDragCancel}
-            cancelDrop={cancelDrop}
         >
+            <div>Dragging: {JSON.stringify(draggingContainerAndItem)}</div>
+            <div>Over: {JSON.stringify(dragOverContainerAndItem)}</div>
+            <div>Projected: {JSON.stringify(dragDepth)}</div>
+
             <DroppableContainer
                 key={GRID_CONTAINER_ID}
                 id={GRID_CONTAINER_ID}
@@ -521,10 +743,18 @@ export function DragContainer<Value>({
                 </SortableContext>
             </DroppableContainer>
             <SortableContext
-                items={[...Object.keys(trees), TREES_PLACEHOLDER_ID]}
+                items={[
+                    ...(restrictToTreeId !== undefined
+                        ? [restrictToTreeId]
+                        : Object.keys(trees)),
+                    TREES_PLACEHOLDER_ID,
+                ]}
                 strategy={horizontalListSortingStrategy}
             >
-                {Object.keys(trees).map((treeId) => {
+                {(restrictToTreeId !== undefined
+                    ? [restrictToTreeId]
+                    : Object.keys(trees)
+                ).map((treeId) => {
                     const flattenedTreeItems = flattenedItems[treeId] ?? [];
                     // todo: memoize:
                     const sortedIds = flattenedTreeItems.map((item) => item.id);
@@ -539,38 +769,47 @@ export function DragContainer<Value>({
                                     id,
                                     depth,
                                     value,
-                                    isExpanded,
                                     allowsChildren,
-                                    hiddenChildren,
+                                    isExpanded,
                                 }) => (
-                                    <SortableTreeItem
-                                        key={id}
-                                        id={id}
-                                        value={id.toString()}
-                                        depth={
-                                            id === draggingId && projected
-                                                ? projected.depth
-                                                : depth
-                                        }
-                                        indentationWidth={indentationWidth}
-                                        indicator
-                                        collapsed={
-                                            !isExpanded && allowsChildren
-                                        }
-                                        onCollapse={
-                                            allowsChildren
-                                                ? () =>
-                                                      onExpandChange(id, false)
-                                                : undefined
-                                        }
-                                        onRemove={() => onRemove(id)}
-                                    />
+                                    <>
+                                        <SortableTreeItem
+                                            key={id}
+                                            id={id}
+                                            depth={
+                                                id === draggingId
+                                                    ? dragDepth
+                                                    : depth
+                                            }
+                                            isClone={false}
+                                            indentationWidth={INDENT_WIDTH}
+                                        >
+                                            {allowsChildren && (
+                                                <ExpandCollapseButton
+                                                    isExpanded={isExpanded}
+                                                    onToggle={() =>
+                                                        onTreeItemExpandChange(
+                                                            treeId,
+                                                            id,
+                                                            !isExpanded,
+                                                        )
+                                                    }
+                                                />
+                                            )}
+                                            <TreeItemText>
+                                                {String(value)}
+                                            </TreeItemText>
+                                            <Remove
+                                                onClick={() => onRemove(id)}
+                                            />
+                                        </SortableTreeItem>
+                                    </>
                                 ),
                             )}
                         </SortableContext>
                     );
                 })}
-                {focusTreeId !== undefined ? undefined : (
+                {restrictToTreeId !== undefined ? undefined : (
                     <DroppableContainer
                         id={TREES_PLACEHOLDER_ID}
                         disabled={isDraggingContainer}
@@ -610,21 +849,46 @@ export function DragContainer<Value>({
                 <DragOverlay
                     dropAnimation={dropAnimation}
                     modifiers={
-                        isDragOverContainerATree ? [adjustTranslate] : undefined
+                        dragOverContainerAndItem?.type === 'tree-item'
+                            ? [adjustTranslate]
+                            : undefined
                     }
                 >
                     {draggingId ? (
                         isDraggingContainer ? (
-                            renderGridContainerDragOverlay(draggingId)
-                        ) : isDragOverContainerATree ? (
+                            // <SortableTreeItem
+                            //     id={draggingId}
+                            //     depth={activeItem.depth}
+                            //     clone
+                            //     childCount={getChildCount(items, activeId) + 1}
+                            //     value={draggingId.toString()}
+                            //     indentationWidth={indentationWidth}
+                            // />
+                            <>Container: {draggingId}</>
+                        ) : draggingContainerAndItem?.type === 'tree-item' ? (
                             <SortableTreeItem
                                 id={draggingId}
-                                depth={activeItem.depth}
-                                clone
-                                childCount={getChildCount(items, activeId) + 1}
-                                value={activeId.toString()}
-                                indentationWidth={indentationWidth}
-                            />
+                                depth={dragDepth}
+                                isClone={true}
+                                indentationWidth={INDENT_WIDTH}
+                            >
+                                {draggingContainerAndItem.item.children && (
+                                    <ExpandCollapseButton
+                                        isExpanded={false}
+                                        onToggle={() => {}}
+                                    />
+                                )}
+                                <TreeItemText>
+                                    {String(
+                                        draggingContainerAndItem.item.value,
+                                    )}
+                                </TreeItemText>
+                                {draggingDescendentCount > 0 && (
+                                    <span className={treeItemStyles.Count}>
+                                        {draggingDescendentCount + 1}
+                                    </span>
+                                )}
+                            </SortableTreeItem>
                         ) : (
                             <Item value={draggingId} handle dragOverlay />
                         )
@@ -636,116 +900,22 @@ export function DragContainer<Value>({
         </DndContext>
     );
 
-    function handleDragStart({ active: { id: activeId } }: DragStartEvent) {
-        setDraggingId(activeId);
-        setDragOverId(activeId);
-    }
-
-    function handleDragMove({ delta }: DragMoveEvent) {
-        if (dragOverContainerAndItem?.containerType === 'tree') {
-            setDraggingOffsetLeft(delta.x);
-        } else {
-            setDraggingOffsetLeft(0);
-        }
-    }
-
-    function handleDragOver({ over }: DragOverEvent) {
-        const overId = over?.id;
-        setDragOverId(overId);
-    }
-
-    function handleDragCancel(event: DragCancelEvent) {
-        setDraggingId(undefined);
-        setDragOverId(undefined);
-        setDragData(undefined);
-    }
-
-    function handleDragEnd({ active, over }: DragEndEvent) {
-        if (over) {
-            // if (overId === PLACEHOLDER_ID) {
-            //     const newContainerId = getNextContainerId();
-
-            //     unstable_batchedUpdates(() => {
-            //         setContainers((containers) => [...containers, newContainerId]);
-            //         setItems((items) => ({
-            //             ...items,
-            //             [activeContainer]: items[activeContainer].filter(
-            //                 (id) => id !== activeId,
-            //             ),
-            //             [newContainerId]: [active.id],
-            //         }));
-            //         setActiveId(null);
-            //     });
-            //     return;
-            // }
-            const fromContainer = {
-                containerId: draggingContainerAndItem!.containerId,
-                containerType: draggingContainerAndItem!.containerType,
-            };
-            const fromData = (
-                draggingContainerAndItem!.containerType === 'tree'
-                    ? nestFlattenedNodes
-                    : simplifyFlattenedNodes
-            )(dragData![draggingContainerAndItem!.containerId]);
-            const toContainer = {
-                containerId: draggingContainerAndItem!.containerId,
-                containerType: draggingContainerAndItem!.containerType,
-            };
-            const toData = (
-                dragOverContainerAndItem!.containerType === 'tree'
-                    ? nestFlattenedNodes
-                    : simplifyFlattenedNodes
-            )(dragData![dragOverContainerAndItem!.containerId]);
-            onMoveItem({
-                from: {
-                    container: fromContainer,
-                    data: fromData,
-                },
-                to: {
-                    container: toContainer,
-                    data: toData,
-                },
-            });
-        }
-
-        setDraggingId(undefined);
-        setDragOverId(undefined);
-        setDragData(undefined);
-    }
-
-    function renderGridContainerDragOverlay(containerId: UniqueIdentifier) {
-        return (
-            <Container
-                label={`Column ${containerId}`}
-                columns={columns}
-                style={{
-                    height: '100%',
-                }}
-                shadow
-                unstyled={false}
-            >
-                {items.grid.map((item, index) => (
-                    <Item
-                        key={item}
-                        value={item}
-                        handle={handle}
-                        style={getItemStyles({
-                            containerId,
-                            overIndex: -1,
-                            index: getIndex(item),
-                            value: item,
-                            isDragging: false,
-                            isSorting: false,
-                            isDragOverlay: false,
-                        })}
-                        color={getColor(item)}
-                        wrapperStyle={gridItemWrapperStyle({ index })}
-                        renderItem={renderItem}
-                    />
-                ))}
-            </Container>
-        );
-    }
+    // function renderGridContainerDragOverlay(containerId: UniqueIdentifier) {
+    //     return (
+    //         <Container
+    //             columns={columns}
+    //             style={{
+    //                 height: '100%',
+    //             }}
+    //             shadow
+    //             unstyled={false}
+    //         >
+    //             {items.grid.map((item, index) => (
+    //                 <Item key={item} value={item} handle />
+    //             ))}
+    //         </Container>
+    //     );
+    // }
 
     // function handleRemove(containerID: UniqueIdentifier) {
     //     setTreeContainers((containers) =>

@@ -1,13 +1,20 @@
-import React, { CSSProperties } from 'react';
-import type { UniqueIdentifier } from '@dnd-kit/core';
-import { AnimateLayoutChanges, useSortable } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+import React, { type CSSProperties } from 'react';
 
-import { TreeItem, Props as TreeItemProps } from './TreeItem';
+import type { UniqueIdentifier } from '@dnd-kit/core';
+import { type AnimateLayoutChanges, useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import classNames from 'clsx';
+
+import { Handle } from '../../../../components';
+import styles from './TreeItem.module.css';
+
 import { iOS } from '../../utilities';
 
-interface Props extends TreeItemProps {
+interface Props {
     id: UniqueIdentifier;
+    depth: number;
+    isClone: boolean;
+    indentationWidth: number;
 }
 
 const animateLayoutChanges: AnimateLayoutChanges = ({
@@ -15,7 +22,13 @@ const animateLayoutChanges: AnimateLayoutChanges = ({
     wasDragging,
 }) => isSorting || wasDragging;
 
-export function SortableTreeItem({ id, depth, ...props }: Props) {
+export const SortableTreeItem: React.FC<React.PropsWithChildren<Props>> = ({
+    id,
+    depth,
+    isClone,
+    children,
+    indentationWidth,
+}) => {
     const {
         attributes,
         isDragging,
@@ -35,19 +48,30 @@ export function SortableTreeItem({ id, depth, ...props }: Props) {
     };
 
     return (
-        <TreeItem
-            ref={setDraggableNodeRef}
-            wrapperRef={setDroppableNodeRef}
-            style={style}
-            depth={depth}
-            ghost={isDragging}
-            disableSelection={iOS}
-            disableInteraction={isSorting}
-            handleProps={{
-                ...attributes,
-                ...listeners,
-            }}
-            {...props}
-        />
+        <li
+            className={classNames(
+                styles.Wrapper,
+                isClone && styles.clone,
+                isDragging && styles.isDragging,
+                styles.indicator,
+                iOS && styles.disableSelection,
+                isSorting && styles.disableInteraction,
+            )}
+            ref={setDroppableNodeRef}
+            style={
+                {
+                    '--spacing': `${indentationWidth * depth}px`,
+                } as React.CSSProperties
+            }
+        >
+            <div
+                className={styles.TreeItem}
+                ref={setDraggableNodeRef}
+                style={style}
+            >
+                <Handle {...attributes} {...listeners} />
+                {children}
+            </div>
+        </li>
     );
-}
+};

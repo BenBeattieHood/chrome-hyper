@@ -1,3 +1,4 @@
+import type { HyperTreeProps } from "../components/drag-container";
 import { HyperTreeNode } from "./types";
 
 interface UseHyperTreeStateProps<InputData, ItemData> {
@@ -9,23 +10,34 @@ interface UseHyperTreeStateProps<InputData, ItemData> {
 }
 
 const NEW_TAB_URL = 'about:newtab';
+const GRID_BOOKMARK_ROOT_NAME = 'hyper--grid--root';
 
-export const useHyperTreeState = <InputData, ItemData>({
+type HyperTreeNodeData = {
+    bookmark: Browser.bookmarks.BookmarkTreeNode;
+    tab: Browser.tabs.Tab | undefined;
+} | {
+    tab: Browser.tabs.Tab;
+}
+
+type UseHyperTreeStateReturn = Pick<
+    HyperTreeProps<HyperTreeNodeData>,
+    | 'gridItems'
+    | 'trees'
+    | 'listItems'
+    | 'focussedItemId'
+    | 'onMoveItem'
+    | 'onExpandChange'
+    | 'onAddTreeContainer'
+    | 'onRemove'
+>
+
+export const useMergedBookmarksAndTabs = <InputData, ItemData>({
     bookmarks,
     tabs
-}: UseHyperTreeStateProps<InputData, ItemData>) => {
-    const items = useMemo(() => {
-        const tabLookup = new Map<string, Browser.tabs.Tab[]>();
-        tabs.forEach(tab => {
-            const urlKey = tab.url !== undefined ? getUrlAsMapKey(tab.url) : NEW_TAB_URL;
-            const existingTabs = tabLookup.get(urlKey);
-            if (existingTabs) {
-                existingTabs.push(tab);
-            }
-            else {
-                tabLookup.set(urlKey, [tab]);
-            }
-        });
+}: UseHyperTreeStateProps<InputData, ItemData>): UseHyperTreeStateReturn => {
+    const tabLookup = useMemo(() => buildTabLookup(tabs), [tabs]);
+
+    const { allocatedTabs, treeItems } = useMemo<UseHyperTreeStateReturn>(() => {
         const allocatedTabs = new WeakSet<Browser.tabs.Tab>();
         const treeItems = bookmarks.map(bookmark => convertBookmarkToTreeItem(bookmark, tabLookup, allocatedTabs));
 
@@ -34,8 +46,23 @@ export const useHyperTreeState = <InputData, ItemData>({
 
     return {
         items,
-        activeItemId: tabs.find(tab => tab.highlighted)?.url,
+        activeItemId: tabs.find(tab => tab.highlighted)?.url?.toLowerCase(),
     };
+}
+
+const buildTabLookup = (tabs: Browser.tabs.Tab[]): Map<string, Browser.tabs.Tab[]> => {
+    const tabLookup = new Map<string, Browser.tabs.Tab[]>();
+    tabs.forEach(tab => {
+        const urlKey = tab.url !== undefined ? getUrlAsMapKey(tab.url) : NEW_TAB_URL;
+        const existingTabs = tabLookup.get(urlKey);
+        if (existingTabs) {
+            existingTabs.push(tab);
+        }
+        else {
+            tabLookup.set(urlKey, [tab]);
+        }
+    });
+    return tabLookup;
 }
 
 const getUrlAsMapKey = (url: string): string => {

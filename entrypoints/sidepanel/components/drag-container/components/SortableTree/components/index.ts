@@ -1,1 +1,1 @@
-export {TreeItem, SortableTreeItem} from './TreeItem';
+export { SortableTreeItem } from './TreeItem';

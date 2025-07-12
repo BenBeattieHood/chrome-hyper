@@ -15,7 +15,7 @@ export interface FlattenedItem extends TreeItem {
     index: number;
 }
 
-export type SensorContext = MutableRefObject<{
+export type TreeSensorContext = MutableRefObject<{
     items: FlattenedItem[];
     offset: number;
 }>;

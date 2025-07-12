@@ -60,6 +60,14 @@ export const UNSAFE__keysOf = <T extends Record<keyof any, any>>(x: T): (keyof T
     return Object.keys(x);
 }
 
+export const UNSAFE__valuesOf = <T extends Record<keyof any, any>>(x: T): (T extends Record<any, infer U> ? U : never)[] => {
+    return Object.values(x);
+}
+
+export const UNSAFE__entriesOf = <T extends Record<keyof any, any>>(x: T): [keyof T, T[keyof T]][] => {
+    return Object.entries(x) as [keyof T, T[keyof T]][];
+}
+
 export type Loosen<T> =
     T extends string ? string :
     T extends number ? number :

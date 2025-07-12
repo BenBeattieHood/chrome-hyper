@@ -20,7 +20,7 @@
         }
     }
 
-    &.ghost {
+    &.isDragging {
         &.indicator {
             opacity: 1;
             position: relative;

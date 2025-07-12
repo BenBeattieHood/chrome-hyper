@@ -1,7 +1,10 @@
-export interface TreeNode<Data> {
+export interface ListNode<Data> {
     id: string;
     text: string;
     data: Data
+}
+
+export interface TreeNode<Data> extends ListNode<Data> {
     children?: TreeNode<Data>[];
 }
 
@@ -13,3 +16,5 @@ export type HyperTreeNodeData = {
 }
 
 export type HyperTreeNode = TreeNode<HyperTreeNodeData>
+
+export type HyperListNode = ListNode<HyperTreeNodeData>;
