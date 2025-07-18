@@ -168,14 +168,68 @@ export const App = () => {
                         isExpanded: true,
                         value: 'aac: Folder',
                         children: {
-                            aaaa: {
+                            aaca: {
                                 isExpanded: false,
                                 value: 'aaca: Leaf',
                                 children: undefined,
                             },
-                            aaab: {
+                            aacb: {
                                 isExpanded: false,
                                 value: 'aacb: Leaf',
+                                children: undefined,
+                            },
+                        },
+                    },
+                },
+            },
+            ab: {
+                isExpanded: true,
+                value: 'ab: Folder',
+                children: {
+                    aba: {
+                        isExpanded: true,
+                        value: 'aba: Folder',
+                        children: {
+                            abaa: {
+                                isExpanded: false,
+                                value: 'abaa: Leaf',
+                                children: undefined,
+                            },
+                            abab: {
+                                isExpanded: false,
+                                value: 'abab: Leaf',
+                                children: undefined,
+                            },
+                        },
+                    },
+                    abb: {
+                        isExpanded: false,
+                        value: 'abb: Folder',
+                        children: {
+                            abba: {
+                                isExpanded: false,
+                                value: 'abba: Leaf',
+                                children: undefined,
+                            },
+                            abbb: {
+                                isExpanded: false,
+                                value: 'abbb: Leaf',
+                                children: undefined,
+                            },
+                        },
+                    },
+                    abc: {
+                        isExpanded: true,
+                        value: 'abc: Folder',
+                        children: {
+                            abca: {
+                                isExpanded: false,
+                                value: 'abca: Leaf',
+                                children: undefined,
+                            },
+                            abcb: {
+                                isExpanded: false,
+                                value: 'abcb: Leaf',
                                 children: undefined,
                             },
                         },
@@ -196,17 +250,12 @@ export const App = () => {
             },
         },
     });
-    const [listItems, setListItems] = useState<Record<string, string>>(
-        tabs.reduce(
-            (acc, tab) => {
-                if (tab.url) {
-                    acc[tab.url.toLowerCase()] = tab.url;
-                }
-                return acc;
-            },
-            {} as Record<string, string>, // Initialize as an empty object
-        ),
-    );
+    const [listItems, setListItems] = useState<Record<string, string>>({
+        'about:blank': 'About Blank',
+        'chrome://newtab/': 'New Tab',
+        'firefox://newtab/': 'New Tab',
+        'brave://newtab/': 'New Tab',
+    });
     const [focussedItemId, setFocussedItemId] = useState<string | undefined>(
         undefined,
     );
@@ -286,7 +335,7 @@ export const App = () => {
             <HyperTree<string>
                 gridItems={gridItems}
                 trees={trees}
-                restrictToTreeId={undefined}
+                restrictToTreeId="a"
                 listItems={listItems}
                 focussedItemId={focussedItemId}
                 onMoveItem={onMoveItem}

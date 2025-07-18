@@ -53,7 +53,7 @@ export const SortableTreeItem: React.FC<React.PropsWithChildren<Props>> = ({
                 styles.Wrapper,
                 isClone && styles.clone,
                 isDragging && styles.isDragging,
-                styles.indicator,
+                //styles.indicator,
                 iOS && styles.disableSelection,
                 isSorting && styles.disableInteraction,
             )}
