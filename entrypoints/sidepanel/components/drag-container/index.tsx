@@ -40,19 +40,20 @@ import { Item, Container, ContainerProps, Remove } from './components';
 
 import { SortableTreeItem } from './components/SortableTree/components';
 import { useAssignedRef } from '../../hooks/use-assigned-ref';
-import { getProjection } from './get-projection';
+// import { getProjection } from './get-projection';
 import { FlattenedHierarchialNode, HierarchialNode } from './types';
 import { ExpandCollapseButton } from './components/SortableTree/components/TreeItem/ExpandCollapseButton';
 import { TreeItemText } from './components/SortableTree/components/TreeItem/TreeItemText';
 
 import treeItemStyles from './components/SortableTree/components/TreeItem/TreeItem.module.css';
+import { UNSAFE__entriesOf, UNSAFE__keysOf } from '../../utils/framework';
 
 const INDENT_WIDTH = 50;
 
 const adjustTranslate: Modifier = ({ transform }) => {
     return {
         ...transform,
-        y: transform.y - 25,
+        // y: transform.y - 25,
     };
 };
 
@@ -178,8 +179,14 @@ const updateTreeNodes = <Value,>(
     },
     moveId: UniqueIdentifier,
     moveValue: HierarchialNode<Value>,
-): Record<UniqueIdentifier, HierarchialNode<Value>> =>
-    destinationRef.id === moveId
+): Record<UniqueIdentifier, HierarchialNode<Value>> => {
+    console.log(`updateTreeNodes`, {
+        nodes,
+        destinationRef,
+        moveId,
+        moveValue,
+    });
+    return destinationRef.id === moveId
         ? nodes
         : Object.entries(nodes)
               .filter(([id]) => id !== moveId)
@@ -220,6 +227,7 @@ const updateTreeNodes = <Value,>(
                   },
                   {} as Record<UniqueIdentifier, HierarchialNode<Value>>,
               );
+};
 const removeTreeNode = <Value,>(
     nodes: Record<UniqueIdentifier, HierarchialNode<Value>>,
     id: UniqueIdentifier,
@@ -265,26 +273,43 @@ const findInTreeNodes = <Value,>(
     nodes: Record<UniqueIdentifier, HierarchialNode<Value>>,
     id: UniqueIdentifier,
     indexRef: { current: number },
+    inLastChildCount: number = 0,
 ):
-    | {
-          itemId: UniqueIdentifier;
-          path: UniqueIdentifier[];
-          item: HierarchialNode<Value>;
-      }
+    | Pick<
+          Extract<FindContainerAndItemResult<Value>, { type: 'tree-item' }>,
+          'itemId' | 'path' | 'item' | 'position' | 'inLastChildCount'
+      >
     | undefined => {
     if (id in nodes) {
-        indexRef.current +=
-            (Object.keys(nodes) as UniqueIdentifier[]).indexOf(id) + 1;
+        const nodeKeys = UNSAFE__keysOf(nodes);
+        const nodeIndex = nodeKeys.indexOf(id);
+        indexRef.current += nodeIndex + 1;
         return {
             itemId: id,
             path: [id],
             item: nodes[id],
+            position:
+                nodeIndex === 0
+                    ? 'first'
+                    : nodeIndex === nodeKeys.length - 1
+                      ? 'last'
+                      : 'middle',
+            inLastChildCount,
         };
     }
-    for (const [childId, node] of Object.entries(nodes)) {
+    const nodeEntries = UNSAFE__entriesOf(nodes);
+    const lastNodeEntryIndex = nodeEntries.length - 1;
+    for (let i = 0; i <= lastNodeEntryIndex; i++) {
+        const [childId, node] = nodeEntries[i];
         indexRef.current++;
         const childResult =
-            node.children && findInTreeNodes(node.children, id, indexRef);
+            node.children &&
+            findInTreeNodes(
+                node.children,
+                id,
+                indexRef,
+                i === lastNodeEntryIndex ? inLastChildCount + 1 : 0,
+            );
         if (childResult) {
             childResult.path.unshift(childId);
             return childResult;
@@ -348,6 +373,7 @@ type FindContainerAndItemResult<Value> = {
     containerId: UniqueIdentifier;
     itemId: UniqueIdentifier;
     flattenedIndex: number;
+    position: 'first' | 'last' | 'middle';
 } & (
     | {
           type: 'grid-item' | 'list-item';
@@ -357,6 +383,7 @@ type FindContainerAndItemResult<Value> = {
           type: 'tree-item';
           path: UniqueIdentifier[];
           item: HierarchialNode<Value>;
+          inLastChildCount: number;
       }
 );
 
@@ -405,6 +432,8 @@ export function HyperTree<Value>({
             ]) {
                 indexRef.current++;
                 if (id in items) {
+                    const itemKeys = UNSAFE__keysOf(items);
+                    const itemIndex = itemKeys.indexOf(id);
                     return {
                         type:
                             id === GRID_CONTAINER_ID
@@ -414,11 +443,20 @@ export function HyperTree<Value>({
                         itemId: id,
                         value: items[id],
                         flattenedIndex: indexRef.current,
+                        position:
+                            itemIndex === 0
+                                ? 'first'
+                                : itemIndex === itemKeys.length - 1
+                                  ? 'last'
+                                  : 'middle',
                     };
                 }
             }
 
-            for (const [treeContainerId, nodes] of Object.entries(trees)) {
+            const treesEntries = Object.entries(trees);
+            const lastTreeEntryIndex = treesEntries.length - 1;
+            for (let i = 0; i <= lastTreeEntryIndex; i++) {
+                const [treeContainerId, nodes] = treesEntries[i];
                 const treeResult = findInTreeNodes(nodes, id, indexRef);
                 if (treeResult) {
                     return {
@@ -459,7 +497,7 @@ export function HyperTree<Value>({
             draggingContainerAndItem.item.children
                 ? getDescendentCount(draggingContainerAndItem.item.children)
                 : 0,
-        [draggingContainerAndItem, draggingContainerAndItem?.type],
+        [draggingContainerAndItem],
     );
 
     const flattenedItems = useMemo<FlattenedItems<Value>>(
@@ -504,14 +542,19 @@ export function HyperTree<Value>({
             ? dragOverContainerAndItem.path.length - 1
             : 0;
     const dragDepth = Math.max(
-        dropTargetDepth,
+        0, // last node can end up -1 with the below logic, so constrain it to 0 min
+        dragOverContainerAndItem?.type === 'tree-item'
+            ? dropTargetDepth -
+                  dragOverContainerAndItem.inLastChildCount -
+                  (dragOverContainerAndItem.position === 'last' ? 1 : 0)
+            : dropTargetDepth,
         Math.min(
             dragOverContainerAndItem?.type === 'tree-item'
                 ? dragOverContainerAndItem.item.children === undefined
                     ? dropTargetDepth // max depth restricted to being a sibling of the drop target
                     : dropTargetDepth + 1 // max depth restricted to being a child of the drop target
                 : 0,
-            Math.round(treeDragOverOffsetLeft / INDENT_WIDTH), // depth based on offset
+            dropTargetDepth + Math.round(treeDragOverOffsetLeft / INDENT_WIDTH), // depth based on offset
         ),
     );
 
@@ -544,9 +587,13 @@ export function HyperTree<Value>({
         [dragOverContainerAndItem],
     );
 
-    const handleDragOver = useCallback(({ over }: DragOverEvent) => {
-        console.log('drag over', over?.id);
-        const overId = over?.id;
+    const handleDragOver = useCallback((event: DragOverEvent) => {
+        console.log('drag over', event);
+        const overId = event.over?.id;
+        if (overId === 'void') {
+            console.warn('Drag over event without over id');
+            return;
+        }
         setDragOverId(overId);
     }, []);
 
@@ -714,10 +761,6 @@ export function HyperTree<Value>({
             onDragEnd={handleDragEnd}
             onDragCancel={handleDragCancel}
         >
-            <div>Dragging: {JSON.stringify(draggingContainerAndItem)}</div>
-            <div>Over: {JSON.stringify(dragOverContainerAndItem)}</div>
-            <div>Projected: {JSON.stringify(dragDepth)}</div>
-
             <DroppableContainer
                 key={GRID_CONTAINER_ID}
                 id={GRID_CONTAINER_ID}
@@ -821,7 +864,34 @@ export function HyperTree<Value>({
                     </DroppableContainer>
                 )}
             </SortableContext>
-            <DroppableContainer
+            <div style={{ padding: 100 }}>&nbsp;</div>
+            <div
+                style={{
+                    position: 'fixed',
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    background: '#FFF',
+                    padding: 10,
+                    zIndex: 1000,
+                }}
+            >
+                <div>Dragging: {JSON.stringify(draggingContainerAndItem)}</div>
+                <div>Over: {JSON.stringify(dragOverContainerAndItem)}</div>
+                <div>
+                    {JSON.stringify({
+                        active: draggingId,
+                        over: dragOverId,
+                        indent: Math.round(
+                            treeDragOverOffsetLeft / INDENT_WIDTH,
+                        ),
+                        dpepth: dropTargetDepth,
+                        dgDepth: dragDepth,
+                        offset: treeDragOverOffsetLeft,
+                    })}
+                </div>
+            </div>
+            {/* <DroppableContainer
                 key={LIST_CONTAINER_ID}
                 id={LIST_CONTAINER_ID}
                 columns={1}
@@ -844,7 +914,7 @@ export function HyperTree<Value>({
                         );
                     })}
                 </SortableContext>
-            </DroppableContainer>
+            </DroppableContainer> */}
             {createPortal(
                 <DragOverlay
                     dropAnimation={dropAnimation}

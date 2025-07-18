@@ -10,8 +10,4 @@ export interface FlattenedHierarchialNode<Value>
     id: UniqueIdentifier;
     depth: number;
     allowsChildren: boolean;
-    hiddenChildren:
-    | Record<UniqueIdentifier, HierarchialNode<Value>>
-    | undefined;
-    parentId: UniqueIdentifier | null;
 }
